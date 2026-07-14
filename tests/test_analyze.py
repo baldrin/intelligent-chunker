@@ -1,0 +1,149 @@
+from intelligent_chunker import analyze
+
+
+def _section(title, ps, pe, summary="", stype="general"):
+    return {
+        "title": title,
+        "section_type": stype,
+        "summary": summary,
+        "page_start": ps,
+        "page_end": pe,
+    }
+
+
+def test_merge_sections_folds_overlap_duplicates():
+    # Same section seen in two overlapping batches (page 5 overlap).
+    raw = [
+        _section("Eligibility", 1, 5, summary="short"),
+        _section("ELIGIBILITY ", 5, 8, summary="a longer summary"),
+        _section("Claims", 9, 12),
+    ]
+    merged = analyze._merge_sections(raw)
+    titles = [s.title for s in merged]
+    assert len(merged) == 2
+    elig = merged[0]
+    assert elig.page_start == 1 and elig.page_end == 8  # ranges unioned
+    assert elig.summary == "a longer summary"  # longer summary kept
+    assert "Claims" in titles
+
+
+def test_merge_sections_keeps_distinct_titles():
+    raw = [_section("A", 1, 2), _section("B", 3, 4)]
+    assert len(analyze._merge_sections(raw)) == 2
+
+
+def test_merge_sections_orders_by_page():
+    raw = [_section("Later", 10, 12), _section("Earlier", 1, 3)]
+    merged = analyze._merge_sections(raw)
+    assert [s.title for s in merged] == ["Earlier", "Later"]
+
+
+def test_reconcile_unifies_metadata():
+    partials = [
+        {
+            "doc_type": "SPD",
+            "title": "Acme Health Plan",
+            "plan_name": "",
+            "sponsor": "Acme",
+            "effective_dates": ["2024-01-01"],
+            "sections": [_section("Intro", 1, 2)],
+            "glossary": [{"term": "Deductible", "definition": "amount"}],
+            "cross_references": ["see Claims"],
+            "notes": "",
+        },
+        {
+            "doc_type": "",
+            "title": "",
+            "plan_name": "Acme Health",
+            "sponsor": "",
+            "effective_dates": ["2024-01-01", "2025-01-01"],
+            "sections": [_section("Claims", 3, 4)],
+            "glossary": [{"term": "deductible", "definition": "dup"}],
+            "cross_references": ["See Claims"],
+            "notes": "batch 2",
+        },
+    ]
+    profile = analyze.reconcile(partials, source_file="x.pdf", page_count=4)
+    assert profile.doc_type == "SPD"
+    assert profile.title == "Acme Health Plan"  # first non-empty
+    assert profile.plan_name == "Acme Health"
+    assert profile.effective_dates == ["2024-01-01", "2025-01-01"]  # deduped
+    assert len(profile.glossary) == 1  # case-insensitive term dedupe
+    assert len(profile.cross_references) == 1  # case-insensitive string dedupe
+    assert [s.title for s in profile.sections] == ["Intro", "Claims"]
+
+
+def test_analyze_batch_offsets_pages():
+    from conftest import FakeClient, make_pdf
+    from intelligent_chunker.config import ChunkerConfig
+    from intelligent_chunker.pdf_io import PageBatch
+
+    payload = {
+        "doc_type": "SPD",
+        "title": "T",
+        "plan_name": "",
+        "sponsor": "",
+        "effective_dates": [],
+        "sections": [_section("S", 2, 3)],  # batch-relative pages
+        "glossary": [],
+        "cross_references": [],
+        "notes": "",
+    }
+    client = FakeClient([payload])
+    batch = PageBatch(page_start=51, page_end=80, pdf_bytes=make_pdf(2))
+    out = analyze.analyze_batch(client, ChunkerConfig(), batch)
+    # page_offset = 50, so batch-relative 2..3 -> absolute 52..53
+    assert out["sections"][0]["page_start"] == 52
+    assert out["sections"][0]["page_end"] == 53
+
+
+def test_merge_sections_folds_interleaved_duplicates():
+    # Duplicate sightings of "X" separated by "Y" in page order must still fold.
+    raw = [
+        _section("X", 45, 50),
+        _section("Y", 46, 48),
+        _section("X", 46, 55),
+    ]
+    merged = analyze._merge_sections(raw)
+    assert len(merged) == 2
+    x = next(s for s in merged if s.title == "X")
+    assert x.page_start == 45 and x.page_end == 55
+
+
+def test_analyze_document_parallel_matches_sequential():
+    from conftest import FakeClient, make_pdf
+    from intelligent_chunker.config import ChunkerConfig
+
+    payload = {
+        "doc_type": "SPD",
+        "title": "T",
+        "plan_name": "",
+        "sponsor": "",
+        "effective_dates": [],
+        "sections": [_section("S", 1, 2)],  # batch-relative
+        "glossary": [],
+        "cross_references": [],
+        "notes": "",
+    }
+    pdf = make_pdf(4)
+
+    def run_with(concurrency):
+        client = FakeClient([payload])
+        config = ChunkerConfig(
+            max_pages_per_batch=2,
+            batch_overlap_pages=0,
+            pass1_concurrency=concurrency,
+        )
+        profile = analyze.analyze_document(client, config, pdf, "x.pdf")
+        return client, profile
+
+    seq_client, seq = run_with(1)
+    par_client, par = run_with(3)
+
+    # Both modes made one call per batch and reconciled identically:
+    # "S" at abs 1-2 (batch 1) and abs 3-4 (batch 2) touch -> one section 1-4.
+    assert len(seq_client.messages.calls) == len(par_client.messages.calls) == 2
+    assert seq.to_dict() == par.to_dict()
+    assert par.page_count == 4
+    assert len(par.sections) == 1
+    assert par.sections[0].page_start == 1 and par.sections[0].page_end == 4

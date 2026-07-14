@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "intelligent-chunker"
+version = "0.1.0"
+description = "Two-pass, model-native intelligent chunker for SPD PDFs (Claude Haiku + structure-aware chunking)."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "anthropic>=0.40",
+    "pypdf>=4.0",
+    "pysbd>=0.3.4",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Exact GTE token counting. Optional: the chunker falls back to a heuristic
+# counter (with a warning) when these are not installed.
+tokenizer = ["tokenizers>=0.15"]
+# Parquet export for Databricks Vector Search (Delta-friendly typed tables).
+databricks = ["pyarrow>=14"]
+dev = ["pytest>=7.0", "pyarrow>=14"]
+
+[project.scripts]
+intelligent-chunker = "intelligent_chunker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

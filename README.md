@@ -1,0 +1,76 @@
+# intelligent-chunker
+
+Two-pass, **model-native** intelligent chunker for unstructured PDFs — built for
+Summary Plan Description (SPD) benefits documents, but general-purpose.
+
+No PDF text-extraction library: **Claude Haiku reads the PDF directly** (digital
+text *and* scanned pages, via vision). Chunking happens in two passes so chunks
+keep full-document context instead of being cut blindly:
+
+1. **Pass 1 — Global analysis** (`analyze.py`): read the whole document and
+   build a *map* — section outline with page ranges, document-wide metadata,
+   glossary, cross-references.
+2. **Pass 2 — Context-aware chunking** (`chunker.py`): re-read each section
+   *with the map as context* and emit coherent chunks that never break
+   mid-word/mid-sentence. A deterministic **token guard** then enforces the
+   embedder's hard limit so nothing is silently truncated.
+
+Output is `chunks.jsonl` (one embedding-ready chunk per line, with metadata) plus
+`profile.json` (the global map).
+
+> **Scope:** the chunker only. Embedding (against an existing **GTE-large v1.5**
+> model over HTTP) is interface-only/stubbed in `embed.py` and wired in a later
+> phase.
+
+## Install
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[tokenizer,dev]"
+cp .env.example .env   # add your ANTHROPIC_API_KEY
+```
+
+The `tokenizer` extra installs the GTE tokenizer for exact chunk sizing; without
+it the chunker falls back to a heuristic counter and warns.
+
+## Use
+
+```bash
+intelligent-chunker chunk path/to/spd.pdf --out chunks.jsonl --profile profile.json
+# options: --max-tokens 1024 --target-tokens 512 --max-pages-per-batch 50
+#          --pass1-concurrency 4 --pass1-model claude-haiku-4-5
+#          --pass2-model claude-haiku-4-5 -v
+
+# Browse the output in a self-contained HTML viewer (no server needed):
+intelligent-chunker view --chunks chunks.jsonl --profile profile.json --open
+
+# Export Databricks-ready Parquet tables (needs the `databricks` extra: pyarrow):
+intelligent-chunker export --chunks chunks.jsonl --profile profile.json \
+    --out-dir databricks_export   # then load with databricks/build_vector_index.py
+```
+
+> **Request-size limits:** each API call carries a base64-encoded PDF slice.
+> `ChunkerConfig.max_request_mb` (default 25) caps that payload and splits
+> batches that exceed it. The default fits the Anthropic API and Azure AI
+> Foundry (32 MB/request); drop it to ~3 if calls route through Databricks
+> model serving (~4 MB/request).
+
+Or from Python:
+
+```python
+from intelligent_chunker import ChunkerConfig
+from intelligent_chunker.pipeline import run
+
+result = run("spd.pdf", ChunkerConfig(), out_path="chunks.jsonl", profile_path="profile.json")
+print(len(result.chunks), "chunks across", len(result.profile.sections), "sections")
+```
+
+## Tests
+
+```bash
+pytest
+```
+
+Unit tests cover the deterministic pieces (page batching, profile reconciliation,
+the token guard) with the model API mocked. An end-to-end run needs a real
+`ANTHROPIC_API_KEY`.

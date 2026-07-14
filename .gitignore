@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.env
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+*.jsonl
+profile*.json
+viewer.html
+databricks_export/
+test_documents/
