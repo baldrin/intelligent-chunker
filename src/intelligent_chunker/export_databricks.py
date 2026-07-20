@@ -1,8 +1,8 @@
 """Export chunker output as Databricks-ready Parquet tables.
 
 Produces three typed, Delta-friendly tables from a ``chunks.jsonl`` /
-``profile.json`` pair so they drop straight into Databricks Vector Search
-Delta Sync indexes:
+``profile.json`` pair so they drop straight into Databricks AI Search
+(formerly Vector Search) Delta Sync indexes:
 
 * ``chunks``     -- one row per chunk; the retrieval unit. Carries a
                     contextual ``embedding_text`` (document + section context
