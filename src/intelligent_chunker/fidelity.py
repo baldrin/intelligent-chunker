@@ -203,16 +203,28 @@ def fidelity_report(
         reference = "\n".join(page_texts[start - 1 : end])
         candidate = "\n".join(by_section.get(sec.title, []))
         score = score_texts(reference, candidate)
-        sections.append({"title": sec.title, "shared_pages": has_shared, **score})
+        sections.append(
+            {
+                "title": sec.title,
+                "section_type": sec.section_type,
+                "shared_pages": has_shared,
+                **score,
+            }
+        )
 
         if has_shared:
             continue  # scores biased by neighbors' text; report but don't warn
-        if sec.section_type == "unmapped":
-            # Synthetic title/TOC sections: their pages hold navigation noise
-            # that is deliberately dropped or thinly chunked, so low coverage
-            # is expected, not a defect. Report the score, suppress the warning.
-            continue
-        if score["coverage"] < COVERAGE_WARN_BELOW:
+        # Synthetic "unmapped" title/TOC sections hold navigation noise that
+        # is deliberately dropped or thinly chunked, so LOW COVERAGE there is
+        # expected, not a defect -- that warning is suppressed (the score is
+        # still reported, with section_type explaining why). High NOVELTY is
+        # never expected -- it means invented text -- and since the per-chunk
+        # flags also skip unmapped sections, this warning is the only signal
+        # left for that case, so it stays active.
+        if (
+            sec.section_type != "unmapped"
+            and score["coverage"] < COVERAGE_WARN_BELOW
+        ):
             logger.warning(
                 "Fidelity: section %r coverage %.2f -- text-layer content "
                 "may be missing from its chunks",
