@@ -7,6 +7,7 @@ name = "intelligent-chunker"
 version = "0.1.0"
 description = "Two-pass, model-native intelligent chunker for SPD PDFs (Claude Haiku + structure-aware chunking)."
 readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.112,<1",

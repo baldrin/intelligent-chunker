@@ -9,14 +9,18 @@ keep full-document context instead of being cut blindly:
 
 1. **Pass 1 — Global analysis** (`analyze.py`): read the whole document and
    build a *map* — section outline with page ranges, document-wide metadata,
-   glossary, cross-references.
+   glossary, cross-references. A deterministic **coverage guard** then fills
+   any pages the outline missed with synthetic "Unmapped pages" sections, so
+   Pass 2 never silently skips content.
 2. **Pass 2 — Context-aware chunking** (`chunker.py`): re-read each section
-   *with the map as context* and emit coherent chunks that never break
-   mid-word/mid-sentence. A deterministic **token guard** then enforces the
-   embedder's hard limit so nothing is silently truncated.
+   *with the map as context* (sections fan out across threads) and emit
+   coherent chunks — each carrying its own physical page range — that never
+   break mid-word/mid-sentence. A deterministic **token guard** then enforces
+   the embedder's hard limit so nothing is silently truncated.
 
-Output is `chunks.jsonl` (one embedding-ready chunk per line, with metadata) plus
-`profile.json` (the global map).
+Output is `chunks.jsonl` (one embedding-ready chunk per line, with metadata)
+plus `profile.json` (the global map, including a **fidelity report** — see
+below). Each run ends with a token-usage line and an estimated cost.
 
 > **Scope:** the chunker only. Embedding (against an existing **GTE-large v1.5**
 > model over HTTP) is interface-only/stubbed in `embed.py` and wired in a later
@@ -38,8 +42,15 @@ it the chunker falls back to a heuristic counter and warns.
 ```bash
 intelligent-chunker chunk path/to/spd.pdf --out chunks.jsonl --profile profile.json
 # options: --max-tokens 1024 --target-tokens 512 --max-pages-per-batch 50
-#          --pass1-concurrency 4 --pass1-model claude-haiku-4-5
-#          --pass2-model claude-haiku-4-5 -v
+#          --pass1-concurrency 4 --pass2-concurrency 4 --max-request-mb 25
+#          --pass1-model claude-haiku-4-5 --pass2-model claude-haiku-4-5
+#          --resume --no-fidelity -v
+
+# Interrupted mid-run? Re-run with --resume: an existing profile.json skips
+# Pass 1, and only sections missing from chunks.jsonl are re-chunked.
+
+# Or run Pass 1 alone and inspect the map before paying for Pass 2:
+intelligent-chunker analyze path/to/spd.pdf --profile profile.json
 
 # Browse the output in a self-contained HTML viewer (no server needed):
 intelligent-chunker view --chunks chunks.jsonl --profile profile.json --open
@@ -50,10 +61,23 @@ intelligent-chunker export --chunks chunks.jsonl --profile profile.json \
 ```
 
 > **Request-size limits:** each API call carries a base64-encoded PDF slice.
-> `ChunkerConfig.max_request_mb` (default 25) caps that payload and splits
-> batches that exceed it. The default fits the Anthropic API and Azure AI
-> Foundry (32 MB/request); drop it to ~3 if calls route through Databricks
-> model serving (~4 MB/request).
+> `--max-request-mb` / `ChunkerConfig.max_request_mb` (default 25) caps that
+> payload and splits batches that exceed it. The default fits the Anthropic
+> API and Azure AI Foundry (32 MB/request); drop it to ~3 if calls route
+> through Databricks model serving (~4 MB/request).
+
+### Fidelity report
+
+After chunking, the pipeline compares each section's chunks against the PDF's
+embedded text layer (word-multiset overlap, no API calls) and writes the
+scores into `profile.json` under `fidelity`: **coverage** (fraction of
+text-layer words present in the chunks — low means content may have been
+missed) and **novelty** (fraction of chunk words absent from the text layer —
+high means content may have been invented). Sections outside the advisory
+thresholds (coverage < 0.85, novelty > 0.15) log warnings. The comparison is
+deliberately rough — repeated headers/footers and hyphenation add noise, and
+scanned PDFs (no text layer) skip the report — so treat scores as signals to
+inspect in the viewer, not hard pass/fail. `--no-fidelity` skips it.
 
 Or from Python:
 

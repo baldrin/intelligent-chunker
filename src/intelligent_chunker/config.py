@@ -28,6 +28,9 @@ DEFAULT_TARGET_TOKENS = 512
 # calls are routed through Databricks model serving.
 DEFAULT_MAX_REQUEST_MB = 25.0
 
+# Pages per Pass 1 batch for long documents (CLI shares this default).
+DEFAULT_MAX_PAGES_PER_BATCH = 50
+
 # Hugging Face id whose tokenizer matches the eventual embedder, so chunk
 # sizing reflects exactly what the embedder will see.
 GTE_TOKENIZER_ID = "Alibaba-NLP/gte-large-en-v1.5"
@@ -51,7 +54,7 @@ class ChunkerConfig:
     # 200K-context models; scanned pages cost more tokens, so keep batches
     # modest. One page of overlap keeps sections that straddle a boundary
     # from being lost.
-    max_pages_per_batch: int = 50
+    max_pages_per_batch: int = DEFAULT_MAX_PAGES_PER_BATCH
     batch_overlap_pages: int = 1
 
     # Request payload budget (see DEFAULT_MAX_REQUEST_MB for platform limits).
