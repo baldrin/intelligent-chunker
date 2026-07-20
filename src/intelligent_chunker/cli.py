@@ -106,6 +106,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_pass1_args(analyze)
 
+    fidelity = sub.add_parser(
+        "fidelity",
+        help="Recompute the report-only fidelity check from existing outputs "
+        "(no API calls) and refresh the profile's fidelity block.",
+    )
+    fidelity.add_argument("pdf", help="Path to the source PDF.")
+    fidelity.add_argument(
+        "--chunks", default="chunks.jsonl", help="Chunks JSONL path."
+    )
+    fidelity.add_argument(
+        "--profile", default="profile.json", help="Profile JSON path."
+    )
+    fidelity.add_argument(
+        "--no-write",
+        action="store_true",
+        help="Print the summary without updating the profile file.",
+    )
+    fidelity.add_argument(
+        "-v", "--verbose", action="store_true", help="Verbose logging."
+    )
+
     view = sub.add_parser(
         "view", help="Build a self-contained HTML viewer for the output."
     )
@@ -211,6 +232,72 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"{profile.page_count} pages."
         )
         print(f"Usage: {usage.summary()}")
+        return 0
+
+    if args.command == "fidelity":
+        import json
+
+        from .fidelity import fidelity_report
+        from .models import Chunk, DocumentProfile
+        from .pdf_io import read_pdf
+
+        try:
+            pdf_bytes = read_pdf(args.pdf)
+            with open(args.profile, "r", encoding="utf-8") as f:
+                profile_dict = json.load(f)
+            with open(args.chunks, "r", encoding="utf-8") as f:
+                chunks = [
+                    Chunk.from_dict(json.loads(line))
+                    for line in f
+                    if line.strip()
+                ]
+        except FileNotFoundError as exc:
+            print(
+                f"Input not found: {exc.filename or exc}. "
+                "Run `intelligent-chunker chunk` first.",
+                file=sys.stderr,
+            )
+            return 1
+        profile = DocumentProfile.from_dict(profile_dict)
+        report = fidelity_report(pdf_bytes, profile, chunks)
+
+        if report["status"] == "ok":
+            doc = report["document"]
+            print(
+                f"Document: coverage {doc['coverage']:.4f}, "
+                f"novelty {doc['novelty']:.4f} "
+                f"({doc['reference_words']} text-layer words, "
+                f"{doc['chunk_words']} chunk words)."
+            )
+            flagged = report.get("chunks", [])
+            if flagged:
+                print(f"Flagged chunks: {len(flagged)}")
+                for f_ in flagged:
+                    line = (
+                        f"; e.g. {f_['novel_lines'][0]!r}"
+                        if f_["novel_lines"]
+                        else ""
+                    )
+                    print(
+                        f"  chunk {f_['chunk_index']} "
+                        f"(pages {f_['page_start']}-{f_['page_end']}, "
+                        f"{f_['section']!r}): novelty {f_['novelty']:.2f}"
+                        f"{line}"
+                    )
+            else:
+                print("Flagged chunks: none.")
+        else:
+            print(f"Fidelity skipped: {report['reason']}")
+
+        if not args.no_write:
+            with open(args.profile, "w", encoding="utf-8") as f:
+                json.dump(
+                    {**profile_dict, "fidelity": report},
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            print(f"Updated the fidelity block in {args.profile}.")
         return 0
 
     if args.command == "view":
