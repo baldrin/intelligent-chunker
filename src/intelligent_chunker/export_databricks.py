@@ -268,7 +268,9 @@ def export(
 
     chunks_path = os.path.join(out_dir, "chunks.parquet")
     documents_path = os.path.join(out_dir, "documents.parquet")
-    glossary_path = os.path.join(out_dir, "glossary.parquet") if include_glossary else ""
+    glossary_path = (
+        os.path.join(out_dir, "glossary.parquet") if include_glossary else ""
+    )
 
     _write_table(chunk_rows, chunk_schema, chunks_path)
     _write_table([doc_row], doc_schema, documents_path)

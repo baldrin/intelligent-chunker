@@ -4,7 +4,6 @@ import pytest
 
 from intelligent_chunker import export_databricks as ex
 
-
 PROFILE = {
     "source_file": "spd.pdf",
     "page_count": 20,
@@ -13,7 +12,15 @@ PROFILE = {
     "plan_name": "Acme 401(k) Plan",
     "sponsor": "Acme",
     "effective_dates": ["2024-01-01"],
-    "sections": [{"title": "Vesting", "section_type": "vesting", "summary": "your rights", "page_start": 5, "page_end": 6}],
+    "sections": [
+        {
+            "title": "Vesting",
+            "section_type": "vesting",
+            "summary": "your rights",
+            "page_start": 5,
+            "page_end": 6,
+        }
+    ],
     "glossary": [
         {"term": "Vesting", "definition": "your nonforfeitable right"},
         {"term": "vesting", "definition": "dup casing"},

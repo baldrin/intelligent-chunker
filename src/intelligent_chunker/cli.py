@@ -10,10 +10,10 @@ from typing import List, Optional
 from dotenv import load_dotenv
 
 from .config import (
-    ChunkerConfig,
-    DEFAULT_MODEL,
     DEFAULT_MAX_TOKENS,
+    DEFAULT_MODEL,
     DEFAULT_TARGET_TOKENS,
+    ChunkerConfig,
 )
 from .pipeline import run
 

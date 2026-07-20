@@ -1,8 +1,8 @@
+from conftest import FakeClient, WordCounter, make_pdf
+
 from intelligent_chunker import chunker
 from intelligent_chunker.config import ChunkerConfig
 from intelligent_chunker.models import DocumentProfile, Section
-from conftest import FakeClient, WordCounter, make_pdf
-
 
 COUNTER = WordCounter()
 
@@ -92,7 +92,9 @@ def test_pack_chunks_merges_small_pieces_up_to_target():
 
 
 def test_pack_chunks_never_exceeds_target_when_pieces_fit():
-    pieces = [{"text": f"w{i}", "keywords": [], "cross_references": []} for i in range(10)]
+    pieces = [
+        {"text": f"w{i}", "keywords": [], "cross_references": []} for i in range(10)
+    ]
     packed = chunker.pack_chunks(pieces, target_tokens=4, counter=COUNTER)
     assert all(COUNTER.count(p["text"]) <= 4 for p in packed)
     # 10 single-word pieces packed 4 per chunk -> 3 chunks (4,4,2)
@@ -157,7 +159,10 @@ def test_chunk_document_reports_sections_incrementally():
     profile = DocumentProfile(
         source_file="x.pdf",
         page_count=2,
-        sections=[Section("S1", "general", "", 1, 1), Section("S2", "general", "", 2, 2)],
+        sections=[
+            Section("S1", "general", "", 1, 1),
+            Section("S2", "general", "", 2, 2),
+        ],
     )
     seen = []
     chunks = chunker.chunk_document(

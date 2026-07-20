@@ -1,5 +1,6 @@
-from intelligent_chunker import pdf_io
 from conftest import make_pdf
+
+from intelligent_chunker import pdf_io
 
 
 def test_count_pages():

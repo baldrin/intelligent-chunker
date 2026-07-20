@@ -7,7 +7,7 @@ structured-output schemas the model fills in stay in lock-step with the code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 

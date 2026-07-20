@@ -75,6 +75,7 @@ def test_reconcile_unifies_metadata():
 
 def test_analyze_batch_offsets_pages():
     from conftest import FakeClient, make_pdf
+
     from intelligent_chunker.config import ChunkerConfig
     from intelligent_chunker.pdf_io import PageBatch
 
@@ -112,6 +113,7 @@ def test_merge_sections_folds_interleaved_duplicates():
 
 def test_analyze_document_parallel_matches_sequential():
     from conftest import FakeClient, make_pdf
+
     from intelligent_chunker.config import ChunkerConfig
 
     payload = {
