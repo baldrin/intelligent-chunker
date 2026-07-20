@@ -10,6 +10,12 @@ multiset of the produced chunks:
 * ``novelty``  -- fraction of chunk words absent from the text layer
   (high novelty = content may have been invented).
 
+The document-level score compares ALL pages against ALL chunks, which is the
+trustworthy number. Per-section scores carry a known bias: sections often
+share a page, so a section's reference text includes its neighbors' words and
+coverage reads low even for a perfect transcription. Sections with shared
+pages are marked ``shared_pages: true`` and never warned about.
+
 The comparison is deliberately rough: headers/footers repeat per page,
 hyphenation and ligatures differ between extractors, and scanned PDFs have no
 text layer at all (the report is then skipped). Scores are advisory signals,
@@ -71,6 +77,25 @@ def extract_page_texts(pdf_bytes: bytes) -> List[str]:
     return texts
 
 
+def sections_with_shared_pages(sections: List[Any]) -> List[bool]:
+    """For each section, whether any of its pages is covered by another.
+
+    Shared pages make that section's per-section scores unreliable (the
+    reference includes neighbors' text), so warnings are suppressed there.
+    """
+    page_owners: Dict[int, int] = {}
+    for sec in sections:
+        for page in range(sec.page_start, sec.page_end + 1):
+            page_owners[page] = page_owners.get(page, 0) + 1
+    return [
+        any(
+            page_owners.get(page, 0) > 1
+            for page in range(sec.page_start, sec.page_end + 1)
+        )
+        for sec in sections
+    ]
+
+
 def fidelity_report(
     pdf_bytes: bytes, profile: DocumentProfile, chunks: List[Chunk]
 ) -> Dict[str, Any]:
@@ -86,23 +111,18 @@ def fidelity_report(
     for chunk in chunks:
         by_section.setdefault(chunk.section_title, []).append(chunk.text)
 
+    shared = sections_with_shared_pages(profile.sections)
     sections = []
-    ref_weighted_cov = 0.0
-    cand_weighted_nov = 0.0
-    ref_grand = 0
-    cand_grand = 0
-    for sec in profile.sections:
+    for sec, has_shared in zip(profile.sections, shared):
         start = max(1, min(sec.page_start, len(page_texts)))
         end = max(start, min(sec.page_end, len(page_texts)))
         reference = "\n".join(page_texts[start - 1 : end])
         candidate = "\n".join(by_section.get(sec.title, []))
         score = score_texts(reference, candidate)
-        sections.append({"title": sec.title, **score})
-        ref_weighted_cov += score["coverage"] * score["reference_words"]
-        cand_weighted_nov += score["novelty"] * score["chunk_words"]
-        ref_grand += score["reference_words"]
-        cand_grand += score["chunk_words"]
+        sections.append({"title": sec.title, "shared_pages": has_shared, **score})
 
+        if has_shared:
+            continue  # scores biased by neighbors' text; report but don't warn
         if score["coverage"] < COVERAGE_WARN_BELOW:
             logger.warning(
                 "Fidelity: section %r coverage %.2f -- text-layer content "
@@ -118,11 +138,22 @@ def fidelity_report(
                 score["novelty"],
             )
 
-    return {
-        "status": "ok",
-        "document": {
-            "coverage": round(ref_weighted_cov / ref_grand, 4) if ref_grand else 1.0,
-            "novelty": round(cand_weighted_nov / cand_grand, 4) if cand_grand else 0.0,
-        },
-        "sections": sections,
-    }
+    # The document score is a single global comparison (all pages vs all
+    # chunks) -- immune to the shared-page bias, hence the number to trust.
+    document = score_texts(
+        "\n".join(page_texts), "\n".join(c.text for c in chunks)
+    )
+    if document["coverage"] < COVERAGE_WARN_BELOW:
+        logger.warning(
+            "Fidelity: document coverage %.2f -- text-layer content may be "
+            "missing from the chunks",
+            document["coverage"],
+        )
+    if document["novelty"] > NOVELTY_WARN_ABOVE:
+        logger.warning(
+            "Fidelity: document novelty %.2f -- chunks contain text not "
+            "found in the PDF text layer",
+            document["novelty"],
+        )
+
+    return {"status": "ok", "document": document, "sections": sections}

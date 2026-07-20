@@ -73,11 +73,15 @@ embedded text layer (word-multiset overlap, no API calls) and writes the
 scores into `profile.json` under `fidelity`: **coverage** (fraction of
 text-layer words present in the chunks — low means content may have been
 missed) and **novelty** (fraction of chunk words absent from the text layer —
-high means content may have been invented). Sections outside the advisory
-thresholds (coverage < 0.85, novelty > 0.15) log warnings. The comparison is
-deliberately rough — repeated headers/footers and hyphenation add noise, and
-scanned PDFs (no text layer) skip the report — so treat scores as signals to
-inspect in the viewer, not hard pass/fail. `--no-fidelity` skips it.
+high means content may have been invented). The **document-level score is the
+number to trust** — it compares all pages against all chunks. Per-section
+scores are biased low whenever sections share a page (the reference then
+includes neighbors' text); such sections are marked `shared_pages: true` and
+excluded from warnings. Scores outside the advisory thresholds (coverage
+< 0.85, novelty > 0.15) log warnings. The comparison is deliberately rough —
+repeated headers/footers and hyphenation add noise, and scanned PDFs (no text
+layer) skip the report — so treat scores as signals to inspect in the viewer,
+not hard pass/fail. `--no-fidelity` skips it.
 
 Or from Python:
 

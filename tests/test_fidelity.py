@@ -45,6 +45,26 @@ def test_empty_candidate_is_full_miss():
     assert score["novelty"] == 0.0  # nothing invented either
 
 
+def test_shared_page_detection():
+    sections = [
+        Section("A", "general", "", 1, 3),
+        Section("B", "general", "", 3, 5),   # shares page 3 with A
+        Section("C", "general", "", 6, 7),   # exclusive
+        Section("D", "general", "", 6, 6),   # nested inside C's range
+    ]
+    assert fidelity.sections_with_shared_pages(sections) == [
+        True,
+        True,
+        True,
+        True,
+    ]
+    exclusive = [
+        Section("A", "general", "", 1, 2),
+        Section("B", "general", "", 3, 4),
+    ]
+    assert fidelity.sections_with_shared_pages(exclusive) == [False, False]
+
+
 def test_report_skips_pdfs_without_text_layer():
     # conftest's blank-page PDFs have no text layer -> scanned-PDF path.
     profile = DocumentProfile(
