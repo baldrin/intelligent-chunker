@@ -204,6 +204,69 @@ def test_chunk_document_packs_to_denser_chunks():
         assert c.token_count <= 12
 
 
+# --- per-chunk page grounding ------------------------------------------------
+
+from intelligent_chunker.fidelity import match_key
+
+_P2 = "The quick brown fox paragraph starts here and continues onward"
+_P3 = "eventually that same paragraph finishes with distinct closing words"
+
+_NORM_PAGES = [match_key(t) for t in [
+    "page one has entirely different filler content about eligibility",
+    _P2,
+    _P3,
+    "page four is unrelated trailing material",
+]]
+
+
+def test_ground_chunk_pages_corrects_both_edges():
+    # Text physically spans pages 2-3 but the model claimed (1, 1).
+    pieces = [{"text": _P2 + " " + _P3, "page_start": 1, "page_end": 1}]
+    out = chunker.ground_chunk_pages(pieces, _NORM_PAGES, 1, 4)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (2, 3)
+
+
+def test_ground_chunk_pages_fills_missing_pages():
+    pieces = [{"text": _P2, "page_start": None, "page_end": None}]
+    out = chunker.ground_chunk_pages(pieces, _NORM_PAGES, 1, 4)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
+
+
+def test_ground_chunk_pages_keeps_ambiguous_and_unmatched_edges():
+    dup = match_key("repeated boilerplate appears on more than one page")
+    norm = [dup, dup, match_key(_P3)]
+    pieces = [
+        # Prefix ambiguous (pages 1 and 2): start kept; suffix unique: end set.
+        {"text": "repeated boilerplate appears on more than one page " + _P3,
+         "page_start": 1, "page_end": 1},
+        # Nothing matches anywhere: untouched.
+        {"text": "words that exist nowhere in the layer at all honestly",
+         "page_start": 2, "page_end": 2},
+        # Too short to trust: untouched.
+        {"text": "tiny", "page_start": 2, "page_end": 2},
+    ]
+    out = chunker.ground_chunk_pages(pieces, norm, 1, 3)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (1, 3)
+    assert (out[1]["page_start"], out[1]["page_end"]) == (2, 2)
+    assert (out[2]["page_start"], out[2]["page_end"]) == (2, 2)
+
+
+def test_ground_chunk_pages_repairs_contradicted_model_end():
+    # Start grounds to page 3; the model's end of 1 can't be right.
+    pieces = [{"text": _P3, "page_start": 1, "page_end": 1}]
+    out = chunker.ground_chunk_pages(pieces, _NORM_PAGES, 1, 4)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (3, 3)
+
+
+def test_ground_chunk_pages_searches_only_the_section_range():
+    # Same text exists on pages 2 and 4; a section spanning only 1-3 sees a
+    # unique hit, so the section range disambiguates.
+    norm = [match_key("filler"), match_key(_P2), match_key("x"), match_key(_P2)]
+    pieces = [{"text": _P2, "page_start": 1, "page_end": 1}]
+    out = chunker.ground_chunk_pages(pieces, norm, 1, 3)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
+
+
 # --- section-level dedup -----------------------------------------------------
 
 # A paragraph long enough to be subject to dedup (>= 25 words).

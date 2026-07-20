@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from .config import ChunkerConfig
+from .fidelity import extract_page_texts, match_key
 from .llm import UsageTracker, structured_call
 from .models import Chunk, DocumentProfile, Section
 from .pdf_io import document_block, encoded_size, slice_to_fit
@@ -158,6 +159,75 @@ def _normalize_chunk_pages(
             pe = min(pe, sec_end)
         rc["page_start"], rc["page_end"] = ps, pe
     return raw_chunks
+
+
+# --- text-layer grounding of per-chunk page ranges ---------------------------
+#
+# The model's per-chunk page_start/page_end are self-reported and drift
+# (observed: chunks labeled two pages off even inside a correct section
+# range). When the PDF has a text layer, verify each chunk's edges against
+# where its text physically appears.
+
+# How many normalized characters of a chunk's head/tail to search for (~6-8
+# words: long enough to be distinctive, short enough to sit on one page).
+_CHUNK_MATCH_CHARS = 40
+
+# Chunks whose whole normalized text is shorter than this are too generic to
+# locate reliably (stray headings, table fragments).
+_CHUNK_MATCH_MIN_CHARS = 15
+
+
+def ground_chunk_pages(
+    pieces: List[Dict[str, Any]],
+    norm_pages: List[str],
+    sec_start: int,
+    sec_end: int,
+) -> List[Dict[str, Any]]:
+    """Snap each piece's page range to where its text appears in the section.
+
+    A piece's first/last ``_CHUNK_MATCH_CHARS`` normalized characters are
+    searched across the section's pages (``norm_pages`` is the full
+    document's normalized text layer, ``match_key``-style). An edge found on
+    exactly one page pins that end of the range; zero or multiple hits keep
+    the model's value. Contradictory hits (start after end) distrust both.
+    Pieces are mutated in place and returned.
+    """
+    lo = max(1, sec_start)
+    hi = min(sec_end, len(norm_pages))
+    pages = range(lo, hi + 1)
+    for pc in pieces:
+        key = match_key(pc.get("text") or "")
+        if len(key) < _CHUNK_MATCH_MIN_CHARS:
+            continue
+        prefix = key[:_CHUNK_MATCH_CHARS]
+        suffix = key[-_CHUNK_MATCH_CHARS:]
+        ps_hits = [p for p in pages if prefix in norm_pages[p - 1]]
+        pe_hits = [p for p in pages if suffix in norm_pages[p - 1]]
+        ps = ps_hits[0] if len(ps_hits) == 1 else None
+        pe = pe_hits[0] if len(pe_hits) == 1 else None
+        if ps is not None and pe is not None and ps > pe:
+            continue  # both matched but out of order: trust neither
+        old = (pc.get("page_start"), pc.get("page_end"))
+        if ps is not None:
+            pc["page_start"] = ps
+        if pe is not None:
+            pc["page_end"] = pe
+        # Keep the invariant when only one edge was grounded and the model's
+        # other edge contradicts it.
+        cur_ps, cur_pe = pc.get("page_start"), pc.get("page_end")
+        if cur_ps is not None and cur_pe is not None and cur_ps > cur_pe:
+            if ps is not None:
+                pc["page_end"] = ps
+            else:
+                pc["page_start"] = pe
+        if (pc.get("page_start"), pc.get("page_end")) != old:
+            logger.info(
+                "Grounding: chunk pages %s -> (%s, %s) from the text layer",
+                old,
+                pc.get("page_start"),
+                pc.get("page_end"),
+            )
+    return pieces
 
 
 # Paragraphs shorter than this many words are exempt from deduplication:
@@ -357,6 +427,11 @@ def chunk_document(
 
     sections = list(profile.sections) if sections is None else list(sections)
 
+    # Normalized text layer for per-chunk page grounding (empty for scanned
+    # PDFs, in which case the model's self-reported pages stand).
+    norm_pages = [match_key(t) for t in extract_page_texts(pdf_bytes)]
+    has_text_layer = any(norm_pages)
+
     def fetch(section: Section) -> List[Dict[str, Any]]:
         try:
             return chunk_section(
@@ -423,9 +498,18 @@ def chunk_document(
                     }
                 )
 
-        # 2) Pack small pieces toward the target density.
+        # 2) Pack small pieces toward the target density, then verify the
+        #    packed pages against where the text physically appears.
+        packed = pack_chunks(pieces, pack_target, counter)
+        if has_text_layer:
+            packed = ground_chunk_pages(
+                packed,
+                norm_pages,
+                max(1, min(section.page_start, profile.page_count)),
+                max(section.page_start, min(section.page_end, profile.page_count)),
+            )
         section_chunks: List[Chunk] = []
-        for pc in pack_chunks(pieces, pack_target, counter):
+        for pc in packed:
             section_chunks.append(
                 Chunk(
                     text=pc["text"],

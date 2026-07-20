@@ -50,6 +50,14 @@ def _words(text: str) -> Counter:
     return Counter(_WORD_RE.findall(text.lower()))
 
 
+def match_key(text: str) -> str:
+    """Normalize for text-layer matching: case, whitespace and punctuation are
+    all extraction artifacts (the layer contains e.g. ``II.PARTICIPATION`` and
+    mid-word splits like ``Defer ral``), so keep only [a-z0-9]. Used to locate
+    section headings and chunk text on physical pages."""
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
 def score_texts(reference: str, candidate: str) -> Dict[str, Any]:
     """Multiset word overlap between a reference text and a candidate."""
     ref = _words(reference)
