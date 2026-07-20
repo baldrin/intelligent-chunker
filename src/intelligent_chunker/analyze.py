@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import ChunkerConfig
-from .fidelity import extract_page_texts
+from .fidelity import extract_page_texts, match_key
 from .llm import UsageTracker, structured_call
 from .models import DocumentProfile, GlossaryTerm, Section
 from .pdf_io import PageBatch, document_block, iter_batches
@@ -275,13 +275,6 @@ _INDEX_PAGE_MIN_HEADINGS = 3
 _TOP_OF_PAGE_CHARS = 120
 
 
-def _match_key(text: str) -> str:
-    """Normalize for text-layer matching: case, whitespace and punctuation
-    are all extraction artifacts (the layer contains e.g. ``II.PARTICIPATION``
-    and mid-word splits like ``Defer ral``), so keep only [a-z0-9]."""
-    return re.sub(r"[^a-z0-9]+", "", text.lower())
-
-
 def _heading_hit(norm_page: str, key: str) -> Optional[int]:
     """Offset of ``key`` as a heading in a normalized page, or None.
 
@@ -313,7 +306,7 @@ def ground_sections(
     text layer) and unmatched or ambiguous headings leave the model's ranges
     untouched, so grounding can only refine the outline, not degrade it.
     """
-    norm_pages = [_match_key(t) for t in page_texts]
+    norm_pages = [match_key(t) for t in page_texts]
     if not any(norm_pages):
         return sections  # scanned PDF: nothing to ground against
 
@@ -321,7 +314,7 @@ def ground_sections(
     hits: Dict[int, List[Tuple[int, int]]] = {}  # sec idx -> [(page, offset)]
     page_hit_count: Dict[int, int] = {}
     for i, sec in enumerate(sections):
-        key = _match_key(sec.title)
+        key = match_key(sec.title)
         if len(key) < _MATCH_MIN_KEY_CHARS:
             continue
         for page, norm in enumerate(norm_pages, start=1):
