@@ -266,6 +266,69 @@ def test_ground_chunk_pages_searches_only_the_section_range():
     assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
 
 
+# --- TOC noise cleaning ------------------------------------------------------
+
+# Real shape from the sample SPD: a single line of heading + leader + number
+# entries (the text layer keeps no line breaks), including pypdf's stray
+# ". 8" artifact after a leader run.
+_TOC_TEXT = (
+    "SUMMARY PLAN DESCRIPTION OVERVIEW .................... 1 "
+    "I. BASIC PLAN INFORMATION .................... 2 "
+    "II. PARTICIPATION .................... 4 "
+    "V. VESTING .................... . 8"
+)
+
+
+def test_strip_dot_leaders_cleans_runs_but_keeps_ellipses():
+    assert chunker.strip_dot_leaders("A .......... 4 B") == "A 4 B"
+    assert chunker.strip_dot_leaders("wait... what") == "wait... what"
+    assert chunker.strip_dot_leaders("End of sentence.") == "End of sentence."
+
+
+def test_is_toc_text_detects_single_line_toc():
+    assert chunker.is_toc_text(_TOC_TEXT)
+    # Prose with a couple of dotted rows is not a TOC.
+    prose = ("The plan invests in options described below. " * 8
+             + "Fund A .......... 12 Fund B .......... 34")
+    assert not chunker.is_toc_text(prose)
+    assert not chunker.is_toc_text("Alpha .......... 1 Beta .......... 2")
+
+
+def test_clean_raw_chunks_drops_toc_only_in_unmapped_sections():
+    unmapped = Section("Unmapped pages 1-2", "unmapped", "", 1, 2)
+    mapped = Section("Overview", "overview", "", 1, 2)
+    raw = [
+        {"text": "SUMMARY PLAN DESCRIPTION\nAHS Plan"},  # title page: kept
+        {"text": _TOC_TEXT},
+    ]
+    out = chunker.clean_raw_chunks(list(raw), unmapped)
+    assert [c["text"] for c in out] == ["SUMMARY PLAN DESCRIPTION\nAHS Plan"]
+    # Same TOC text in a mapped section survives, but with leaders stripped.
+    out = chunker.clean_raw_chunks(list(raw), mapped)
+    assert len(out) == 2
+    assert "...." not in out[1]["text"]
+    assert "II. PARTICIPATION 4" in out[1]["text"]
+
+
+def test_chunk_document_drops_toc_and_counts_clean_tokens():
+    payload = {
+        "chunks": [
+            {"text": "Title page words", "keywords": [], "cross_references": []},
+            {"text": _TOC_TEXT, "keywords": [], "cross_references": []},
+        ]
+    }
+    client = FakeClient([payload])
+    config = ChunkerConfig(max_tokens=100, target_tokens=5)
+    profile = DocumentProfile(
+        source_file="x.pdf",
+        page_count=2,
+        sections=[Section("Unmapped pages 1-2", "unmapped", "", 1, 2)],
+    )
+    chunks = chunker.chunk_document(client, config, make_pdf(2), profile, COUNTER)
+    assert len(chunks) == 1
+    assert chunks[0].text == "Title page words"
+
+
 # --- section-level dedup -----------------------------------------------------
 
 # A paragraph long enough to be subject to dedup (>= 25 words).

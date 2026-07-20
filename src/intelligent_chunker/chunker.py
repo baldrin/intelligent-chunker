@@ -230,6 +230,63 @@ def ground_chunk_pages(
     return pieces
 
 
+# --- table-of-contents noise -------------------------------------------------
+#
+# TOC pages come through the text layer as heading + dot-leader + page-number
+# runs ("II. PARTICIPATION......... 4"). The dot runs tokenize horribly (the
+# sample's TOC chunks recorded 751-1024 tokens for ~40 words of text), and the
+# entries themselves are pure retrieval noise.
+
+_DOT_LEADER_RE = re.compile(r"\.{4,}")  # 4+: never touches a real "..." ellipsis
+# One TOC entry: a leader run, optional stray dots/space artifacts, page number.
+_TOC_ENTRY_RE = re.compile(r"\.{4,}[\s.]*\d+")
+_TOC_MIN_ENTRIES = 3
+# TOC text is almost nothing but entries; real prose that happens to contain a
+# few dotted rows has far more words per entry than a heading + page number.
+_TOC_MAX_WORDS_PER_ENTRY = 12
+
+
+def strip_dot_leaders(text: str) -> str:
+    """Collapse dot-leader runs to a space and tidy the leftover spacing."""
+    cleaned = _DOT_LEADER_RE.sub(" ", text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
+def is_toc_text(text: str) -> bool:
+    """Whether ``text`` is a table-of-contents fragment (mostly entries)."""
+    entries = _TOC_ENTRY_RE.findall(text)
+    if len(entries) < _TOC_MIN_ENTRIES:
+        return False
+    words = len(strip_dot_leaders(text).split())
+    return words <= len(entries) * _TOC_MAX_WORDS_PER_ENTRY
+
+
+def clean_raw_chunks(
+    raw_chunks: List[Dict[str, Any]], section: Section
+) -> List[Dict[str, Any]]:
+    """Strip dot leaders everywhere; drop TOC chunks in unmapped sections.
+
+    TOC pages land in synthetic "Unmapped pages" sections (Pass 1 assigns
+    them to no section), which is where dropping is safe. In a mapped section
+    a dotted list might be real content (a fund lineup, a rate table), so it
+    is only cleaned, never dropped.
+    """
+    out: List[Dict[str, Any]] = []
+    for rc in raw_chunks:
+        text = rc.get("text") or ""
+        if section.section_type == "unmapped" and is_toc_text(text):
+            logger.info(
+                "Section %r: dropping a table-of-contents chunk",
+                section.title,
+            )
+            continue
+        stripped = strip_dot_leaders(text)
+        if stripped != text:
+            rc = {**rc, "text": stripped}
+        out.append(rc)
+    return out
+
+
 # Paragraphs shorter than this many words are exempt from deduplication:
 # table headers and schedule rows ("Years of Service | Vesting Percentage",
 # "less than 1 | 100.00") legitimately repeat within a section.
@@ -479,10 +536,11 @@ def chunk_document(
                 section.page_end,
             )
 
-        # 1) Drop duplicated text, then normalize + enforce the hard token
-        #    ceiling, into ordered pieces.
+        # 1) Clean TOC noise and duplicated text, then normalize + enforce
+        #    the hard token ceiling, into ordered pieces.
         pieces: List[Dict[str, Any]] = []
-        for rc in dedupe_raw_chunks(raw_chunks, section.title):
+        cleaned = clean_raw_chunks(raw_chunks, section)
+        for rc in dedupe_raw_chunks(cleaned, section.title):
             text = (rc.get("text") or "").strip()
             if not text:
                 continue
