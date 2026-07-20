@@ -68,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parallel Pass 2 section requests (1 = sequential).",
     )
     chunk.add_argument(
+        "--no-fidelity",
+        action="store_true",
+        help="Skip the report-only fidelity check against the PDF text layer.",
+    )
+    chunk.add_argument(
         "--resume",
         action="store_true",
         help="Reuse an existing profile/chunks file from an interrupted run: "
@@ -135,6 +140,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 out_path=args.out,
                 profile_path=args.profile,
                 resume=args.resume,
+                fidelity=not args.no_fidelity,
             )
         except FileNotFoundError as exc:
             print(f"Input not found: {exc.filename or exc}", file=sys.stderr)

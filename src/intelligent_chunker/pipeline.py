@@ -6,11 +6,12 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from .analyze import analyze_document
 from .chunker import chunk_document
 from .config import ChunkerConfig
+from .fidelity import fidelity_report
 from .llm import UsageTracker, make_client
 from .models import Chunk, DocumentProfile
 from .pdf_io import read_pdf
@@ -24,6 +25,7 @@ class ChunkResult:
     profile: DocumentProfile
     chunks: List[Chunk]
     usage: Optional[UsageTracker] = None
+    fidelity: Optional[Dict[str, Any]] = None
 
 
 def completed_section_prefix(
@@ -62,6 +64,7 @@ def run(
     profile_path: Optional[str] = None,
     client: Optional[object] = None,
     resume: bool = False,
+    fidelity: bool = True,
 ) -> ChunkResult:
     """Chunk one PDF end to end.
 
@@ -150,9 +153,35 @@ def run(
             out_file.close()
     chunks = kept + new_chunks
     logger.info("Pass 2: produced %d chunks (%d new)", len(chunks), len(new_chunks))
+
+    # Report-only fidelity check against the PDF text layer (no API calls);
+    # persisted alongside the profile so the scores travel with the map.
+    report = None
+    if fidelity:
+        report = fidelity_report(pdf_bytes, profile, chunks)
+        if report["status"] == "ok":
+            doc = report["document"]
+            logger.info(
+                "Fidelity: coverage %.2f, novelty %.2f (see profile.json)",
+                doc["coverage"],
+                doc["novelty"],
+            )
+        else:
+            logger.info("Fidelity: %s", report["reason"])
+        if profile_path:
+            with open(profile_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {**profile.to_dict(), "fidelity": report},
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
     logger.info("Usage: %s", usage.summary())
 
-    return ChunkResult(profile=profile, chunks=chunks, usage=usage)
+    return ChunkResult(
+        profile=profile, chunks=chunks, usage=usage, fidelity=report
+    )
 
 
 def write_profile(profile: DocumentProfile, path: str) -> None:
