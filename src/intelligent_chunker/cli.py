@@ -62,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parallel Pass 1 batch requests (1 = sequential).",
     )
     chunk.add_argument(
+        "--pass2-concurrency",
+        type=int,
+        default=4,
+        help="Parallel Pass 2 section requests (1 = sequential).",
+    )
+    chunk.add_argument(
         "-v", "--verbose", action="store_true", help="Verbose logging."
     )
 
@@ -113,6 +119,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             target_tokens=args.target_tokens,
             max_pages_per_batch=args.max_pages_per_batch,
             pass1_concurrency=args.pass1_concurrency,
+            pass2_concurrency=args.pass2_concurrency,
         )
         try:
             result = run(

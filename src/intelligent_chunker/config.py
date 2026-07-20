@@ -63,6 +63,11 @@ class ChunkerConfig:
     # concurrency just trades 429 retries for wall-clock time.
     pass1_concurrency: int = 4
 
+    # Pass 2 section calls are independent too. In cached full-document mode
+    # the first call runs alone to populate the prompt cache before fanning
+    # out, so concurrency never forfeits the cached-read discount.
+    pass2_concurrency: int = 4
+
     # Tokenizer.
     tokenizer_id: str = GTE_TOKENIZER_ID
 

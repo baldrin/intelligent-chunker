@@ -91,6 +91,28 @@ def test_pack_chunks_merges_small_pieces_up_to_target():
         assert p["text"]
 
 
+def test_chunk_document_parallel_preserves_section_order():
+    # One repeated payload keeps the racy call-counting fake deterministic.
+    payload = {"chunks": [{"text": "a b c", "keywords": [], "cross_references": []}]}
+    client = FakeClient([payload])
+    config = ChunkerConfig(max_tokens=100, target_tokens=50, pass2_concurrency=3)
+    profile = DocumentProfile(
+        source_file="x.pdf",
+        page_count=4,
+        sections=[Section(f"S{i}", "general", "", i, i) for i in range(1, 5)],
+    )
+    seen_sections = []
+    chunks = chunker.chunk_document(
+        client, config, make_pdf(4), profile, COUNTER,
+        on_section=lambda cs: seen_sections.append(cs[0].section_title),
+    )
+    assert len(client.messages.calls) == 4
+    # Results are consumed in section order regardless of completion order.
+    assert seen_sections == ["S1", "S2", "S3", "S4"]
+    assert [c.chunk_index for c in chunks] == [0, 1, 2, 3]
+    assert [c.section_title for c in chunks] == ["S1", "S2", "S3", "S4"]
+
+
 def test_normalize_chunk_pages_offsets_and_clamps():
     raw = [
         # Slice-relative 1-2 with offset 4 -> absolute 5-6.

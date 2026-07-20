@@ -9,7 +9,8 @@ intelligent chunking stays model-driven but nothing is ever silently truncated.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from .config import ChunkerConfig
 from .llm import structured_call
@@ -245,6 +246,11 @@ def chunk_document(
     ceiling, then greedily pack consecutive pieces up to the target size so
     chunks are substantial rather than tiny. Packing never crosses a section.
 
+    Section calls are independent, so they fan out across
+    ``config.pass2_concurrency`` threads; results are consumed strictly in
+    section order, so chunk indexing and incremental persistence behave
+    exactly as in a sequential run.
+
     ``on_section`` (if given) receives each section's finished chunks as soon
     as they exist, so callers can persist incrementally -- a failure partway
     through a long run then costs only the unfinished sections.
@@ -267,11 +273,11 @@ def chunk_document(
         full_doc_block["cache_control"] = {"type": "ephemeral"}
         logger.info("Pass 2: using cached full-document mode")
 
-    chunks: List[Chunk] = []
-    index = 0
-    for section in profile.sections:
+    sections = list(profile.sections)
+
+    def fetch(section: Section) -> List[Dict[str, Any]]:
         try:
-            raw_chunks = chunk_section(
+            return chunk_section(
                 client, config, pdf_bytes, profile, section,
                 full_doc_block=full_doc_block,
             )
@@ -280,6 +286,34 @@ def chunk_document(
                 f"Pass 2 failed on section {section.title!r} "
                 f"(pages {section.page_start}-{section.page_end}): {exc}"
             ) from exc
+
+    workers = min(max(1, config.pass2_concurrency), len(sections) or 1)
+    if workers <= 1:
+        results: Iterable[List[Dict[str, Any]]] = (fetch(s) for s in sections)
+    elif full_doc_block is not None:
+        # The first call writes the document into the prompt cache; only fan
+        # out once it exists, so the remaining calls all read it instead of
+        # each re-paying (and re-creating) the cache entry.
+        def staggered() -> Iterator[List[Dict[str, Any]]]:
+            yield fetch(sections[0])
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                yield from pool.map(fetch, sections[1:])
+
+        results = staggered()
+    else:
+
+        def fanned_out() -> Iterator[List[Dict[str, Any]]]:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                yield from pool.map(fetch, sections)
+
+        results = fanned_out()
+
+    chunks: List[Chunk] = []
+    index = 0
+    for pos, (section, raw_chunks) in enumerate(zip(sections, results), start=1):
+        logger.info(
+            "Pass 2: section %d/%d done: %s", pos, len(sections), section.title
+        )
         if not raw_chunks:
             logger.warning(
                 "Section %r (pages %d-%d) produced no chunks",
