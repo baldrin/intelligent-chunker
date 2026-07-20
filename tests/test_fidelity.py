@@ -134,6 +134,47 @@ def test_chunk_novelty_skips_unmapped_sections_and_tiny_chunks():
     assert flags == []
 
 
+def test_unmapped_section_suppresses_coverage_warning_only(monkeypatch, caplog):
+    import logging
+
+    # Two exclusive-page sections whose chunks barely cover their pages AND
+    # contain words absent from them (low coverage + high novelty). For the
+    # unmapped section only the coverage warning is expected-noise; novelty
+    # means invented text and must still warn -- it is the only remaining
+    # signal there, since per-chunk flags skip unmapped sections.
+    # Long enough combined to clear the scanned-PDF floor (200 chars).
+    page1 = "reference words the chunk will mostly fail to cover on page one " * 3
+    page2 = "distinct reference words the chunk also fails to cover on page two " * 3
+    monkeypatch.setattr(fidelity, "extract_page_texts", lambda b: [page1, page2])
+    profile = DocumentProfile(
+        source_file="x.pdf",
+        page_count=2,
+        sections=[
+            Section("Unmapped pages 1-1", "unmapped", "", 1, 1),
+            Section("Mapped", "general", "", 2, 2),
+        ],
+    )
+    tiny = "barely overlap"
+    chunks = [
+        _chunk(0, tiny, ps=1, pe=1, section="Unmapped pages 1-1"),
+        _chunk(1, tiny, ps=2, pe=2, section="Mapped"),
+    ]
+    with caplog.at_level(logging.WARNING, logger="intelligent_chunker.fidelity"):
+        report = fidelity.fidelity_report(make_pdf(2), profile, chunks)
+
+    messages = [r.getMessage() for r in caplog.records]
+    coverage = [m for m in messages if "coverage" in m]
+    novelty = [m for m in messages if "novelty" in m and "section" in m]
+    assert any("Mapped" in m for m in coverage)  # mapped still warns
+    assert not any("Unmapped" in m for m in coverage)  # suppressed
+    assert any("Unmapped" in m for m in novelty)  # invented text still warns
+    # Scores are reported for both, with section_type explaining any
+    # unwarned low score (mirroring the shared_pages marker).
+    by_title = {s["title"]: s for s in report["sections"]}
+    assert by_title["Unmapped pages 1-1"]["section_type"] == "unmapped"
+    assert by_title["Mapped"]["section_type"] == "general"
+
+
 def test_report_skips_pdfs_without_text_layer():
     # conftest's blank-page PDFs have no text layer -> scanned-PDF path.
     profile = DocumentProfile(
