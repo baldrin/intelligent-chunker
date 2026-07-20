@@ -11,9 +11,10 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import ChunkerConfig
+from .fidelity import extract_page_texts
 from .llm import UsageTracker, structured_call
 from .models import DocumentProfile, GlossaryTerm, Section
 from .pdf_io import PageBatch, document_block, iter_batches
@@ -164,7 +165,12 @@ def analyze_document(
                 )
             )
     page_count = batches[-1].page_end if batches else 0
-    return reconcile(partials, source_file=source_file, page_count=page_count)
+    return reconcile(
+        partials,
+        source_file=source_file,
+        page_count=page_count,
+        page_texts=extract_page_texts(pdf_bytes),
+    )
 
 
 # --- reconciliation (deterministic merge of per-batch partials) -------------
@@ -243,6 +249,147 @@ def _merge_glossary(raw_glossaries: List[List[Dict[str, Any]]]) -> List[Glossary
     return out
 
 
+# --- text-layer grounding of section page ranges ----------------------------
+#
+# Despite the prompt, Pass 1 sometimes reports the document's *printed*
+# footer page numbers instead of physical PDF pages (a cover page and TOC
+# offset the two), which corrupts chunk citations, reorders sections, and
+# makes per-section fidelity compare against the wrong pages. When the PDF
+# has a text layer, we can fix this deterministically: find each section's
+# heading in the per-page text and snap the outline to the pages where the
+# headings physically appear.
+
+# Headings shorter than this after normalization ("A.", "IV") are too likely
+# to match by accident to be trusted.
+_MATCH_MIN_KEY_CHARS = 6
+
+# A page whose text matches this many distinct section headings is an index
+# (table-of-contents) page: it matches *every* heading, so its hits would
+# otherwise make every section ambiguous.
+_INDEX_PAGE_MIN_HEADINGS = 3
+
+# A heading whose match starts within this many normalized characters of the
+# top of its page is treated as opening that page (so the previous section
+# ends on the page before); deeper matches mean the page is shared with the
+# previous section. The budget covers a running header line.
+_TOP_OF_PAGE_CHARS = 120
+
+
+def _match_key(text: str) -> str:
+    """Normalize for text-layer matching: case, whitespace and punctuation
+    are all extraction artifacts (the layer contains e.g. ``II.PARTICIPATION``
+    and mid-word splits like ``Defer ral``), so keep only [a-z0-9]."""
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def _heading_hit(norm_page: str, key: str) -> Optional[int]:
+    """Offset of ``key`` as a heading in a normalized page, or None.
+
+    Occurrences immediately preceded by the word "section" are body
+    cross-references ("... in Section III, Contributions."), not headings,
+    and are skipped.
+    """
+    start = 0
+    while True:
+        off = norm_page.find(key, start)
+        if off < 0:
+            return None
+        if not norm_page[:off].endswith("section"):
+            return off
+        start = off + 1
+
+
+def ground_sections(
+    sections: List[Section], page_texts: List[str]
+) -> List[Section]:
+    """Snap section page ranges to where their headings appear in the text layer.
+
+    For every section whose heading text is found on exactly one non-index
+    page, ``page_start`` snaps to that page. Ends are then derived from the
+    following section's grounded start: a heading opening its page puts the
+    previous section's end on the page before; a heading deeper in the page
+    means the two sections share it. Ungrounded sections are only ever pulled
+    back from a grounded neighbor's pages, never extended. Scanned PDFs (no
+    text layer) and unmatched or ambiguous headings leave the model's ranges
+    untouched, so grounding can only refine the outline, not degrade it.
+    """
+    norm_pages = [_match_key(t) for t in page_texts]
+    if not any(norm_pages):
+        return sections  # scanned PDF: nothing to ground against
+
+    # Every (section, page) heading hit, and how many sections hit each page.
+    hits: Dict[int, List[Tuple[int, int]]] = {}  # sec idx -> [(page, offset)]
+    page_hit_count: Dict[int, int] = {}
+    for i, sec in enumerate(sections):
+        key = _match_key(sec.title)
+        if len(key) < _MATCH_MIN_KEY_CHARS:
+            continue
+        for page, norm in enumerate(norm_pages, start=1):
+            off = _heading_hit(norm, key)
+            if off is not None:
+                hits.setdefault(i, []).append((page, off))
+                page_hit_count[page] = page_hit_count.get(page, 0) + 1
+
+    index_pages = {
+        page
+        for page, count in page_hit_count.items()
+        if count >= _INDEX_PAGE_MIN_HEADINGS
+    }
+
+    grounded: Dict[int, Tuple[int, int]] = {}  # sec idx -> (page, offset)
+    for i, sec_hits in hits.items():
+        content_hits = [h for h in sec_hits if h[0] not in index_pages]
+        if len(content_hits) == 1:
+            grounded[i] = content_hits[0]
+
+    for i, (page, _off) in grounded.items():
+        sec = sections[i]
+        if sec.page_start != page:
+            logger.warning(
+                "Grounding: section %r page_start %d -> %d (heading found on "
+                "physical page %d; Pass 1 likely reported printed page numbers)",
+                sec.title,
+                sec.page_start,
+                page,
+                page,
+            )
+            sec.page_start = page
+        if sec.page_end < sec.page_start:
+            sec.page_end = sec.page_start
+
+    # Derive ends from each grounded section's start: the boundary it pins is
+    # authoritative for whichever section precedes it in page order.
+    order = sorted(
+        range(len(sections)),
+        key=lambda i: (sections[i].page_start, sections[i].page_end),
+    )
+    for a, b in zip(order, order[1:]):
+        if b not in grounded:
+            continue
+        cur, nxt = sections[a], sections[b]
+        _page, off = grounded[b]
+        boundary = (
+            nxt.page_start - 1 if off <= _TOP_OF_PAGE_CHARS else nxt.page_start
+        )
+        boundary = max(boundary, cur.page_start)
+        # A grounded section's end is fully derived; an ungrounded one is only
+        # pulled back off the neighbor's pages (its own claim may be printed
+        # numbering, but extending it would be a guess).
+        new_end = boundary if a in grounded else min(cur.page_end, boundary)
+        if cur.page_end != new_end:
+            logger.info(
+                "Grounding: section %r page_end %d -> %d (next section %r "
+                "starts on physical page %d)",
+                cur.title,
+                cur.page_end,
+                new_end,
+                nxt.title,
+                nxt.page_start,
+            )
+            cur.page_end = new_end
+    return [sections[i] for i in order]
+
+
 def _fill_coverage_gaps(sections: List[Section], page_count: int) -> List[Section]:
     """Guarantee every physical page belongs to at least one section.
 
@@ -295,12 +442,24 @@ def _fill_coverage_gaps(sections: List[Section], page_count: int) -> List[Sectio
 
 
 def reconcile(
-    partials: List[Dict[str, Any]], source_file: str, page_count: int
+    partials: List[Dict[str, Any]],
+    source_file: str,
+    page_count: int,
+    page_texts: Optional[List[str]] = None,
 ) -> DocumentProfile:
-    """Merge per-batch partial profiles into one global ``DocumentProfile``."""
+    """Merge per-batch partial profiles into one global ``DocumentProfile``.
+
+    With ``page_texts`` (the per-page text layer), the merged outline is
+    grounded against where section headings physically appear before gaps are
+    filled, correcting printed-vs-physical page numbering from the model.
+    """
     all_sections: List[Dict[str, Any]] = []
     for p in partials:
         all_sections.extend(p.get("sections", []))
+
+    sections = _merge_sections(all_sections)
+    if page_texts:
+        sections = ground_sections(sections, page_texts)
 
     return DocumentProfile(
         source_file=source_file,
@@ -313,7 +472,7 @@ def reconcile(
         effective_dates=_dedupe_strings(
             [d for p in partials for d in p.get("effective_dates", [])]
         ),
-        sections=_fill_coverage_gaps(_merge_sections(all_sections), page_count),
+        sections=_fill_coverage_gaps(sections, page_count),
         glossary=_merge_glossary([p.get("glossary", []) for p in partials]),
         cross_references=_dedupe_strings(
             [c for p in partials for c in p.get("cross_references", [])]
