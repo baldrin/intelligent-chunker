@@ -111,6 +111,59 @@ def test_merge_sections_folds_interleaved_duplicates():
     assert x.page_start == 45 and x.page_end == 55
 
 
+def _reconcile_titles(sections, page_count):
+    partials = [
+        {
+            "doc_type": "SPD",
+            "title": "T",
+            "plan_name": "",
+            "sponsor": "",
+            "effective_dates": [],
+            "sections": sections,
+            "glossary": [],
+            "cross_references": [],
+            "notes": "",
+        }
+    ]
+    profile = analyze.reconcile(partials, source_file="x.pdf", page_count=page_count)
+    return profile.sections
+
+
+def test_coverage_guard_fills_gaps_at_start_middle_end():
+    # Outline covers only 3-4 and 7-8 of a 10-page document.
+    sections = [_section("A", 3, 4), _section("B", 7, 8)]
+    out = _reconcile_titles(sections, page_count=10)
+    assert [s.title for s in out] == [
+        "Unmapped pages 1-2",
+        "A",
+        "Unmapped pages 5-6",
+        "B",
+        "Unmapped pages 9-10",
+    ]
+    unmapped = [s for s in out if s.section_type == "unmapped"]
+    assert [(s.page_start, s.page_end) for s in unmapped] == [(1, 2), (5, 6), (9, 10)]
+
+
+def test_coverage_guard_no_gaps_is_a_no_op():
+    sections = [_section("A", 1, 5), _section("B", 6, 10)]
+    out = _reconcile_titles(sections, page_count=10)
+    assert [s.title for s in out] == ["A", "B"]
+
+
+def test_coverage_guard_clamps_out_of_bounds_ranges():
+    # Model reported a section past the end of the document.
+    sections = [_section("A", 1, 8), _section("B", 9, 99)]
+    out = _reconcile_titles(sections, page_count=10)
+    assert [s.title for s in out] == ["A", "B"]
+    assert out[1].page_start == 9 and out[1].page_end == 10
+
+
+def test_coverage_guard_overlapping_sections_leave_no_false_gaps():
+    sections = [_section("A", 1, 6), _section("B", 4, 10)]
+    out = _reconcile_titles(sections, page_count=10)
+    assert all(s.section_type != "unmapped" for s in out)
+
+
 def test_analyze_document_parallel_matches_sequential():
     from conftest import FakeClient, make_pdf
 

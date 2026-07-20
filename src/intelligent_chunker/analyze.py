@@ -8,6 +8,7 @@ with full-document context instead of a blind linear read.
 
 from __future__ import annotations
 
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
@@ -16,6 +17,8 @@ from .config import ChunkerConfig
 from .llm import structured_call
 from .models import DocumentProfile, GlossaryTerm, Section
 from .pdf_io import PageBatch, document_block, iter_batches
+
+logger = logging.getLogger(__name__)
 
 PASS1_SYSTEM = (
     "You are an expert at analyzing benefits and insurance documents, "
@@ -229,6 +232,57 @@ def _merge_glossary(raw_glossaries: List[List[Dict[str, Any]]]) -> List[Glossary
     return out
 
 
+def _fill_coverage_gaps(sections: List[Section], page_count: int) -> List[Section]:
+    """Guarantee every physical page belongs to at least one section.
+
+    Pass 2 only reads pages the outline names, so a page the model failed to
+    assign to any section would otherwise be silently skipped. Section ranges
+    are clamped into [1, page_count]; every remaining uncovered run of pages
+    becomes a synthetic "Unmapped pages" section (and a warning), so its
+    content still gets chunked.
+    """
+    if page_count <= 0:
+        return sections
+
+    kept: List[Section] = []
+    for sec in sections:
+        sec.page_start = max(1, min(sec.page_start, page_count))
+        sec.page_end = max(sec.page_start, min(sec.page_end, page_count))
+        kept.append(sec)
+
+    covered = [False] * (page_count + 1)  # 1-indexed
+    for sec in kept:
+        for page in range(sec.page_start, sec.page_end + 1):
+            covered[page] = True
+
+    page = 1
+    while page <= page_count:
+        if covered[page]:
+            page += 1
+            continue
+        gap_start = page
+        while page <= page_count and not covered[page]:
+            page += 1
+        gap_end = page - 1
+        logger.warning(
+            "Pass 1 assigned no section to pages %d-%d; adding a synthetic "
+            "'Unmapped pages' section so they still get chunked",
+            gap_start,
+            gap_end,
+        )
+        kept.append(
+            Section(
+                title=f"Unmapped pages {gap_start}-{gap_end}",
+                section_type="unmapped",
+                summary="Pages not assigned to any section by Pass 1.",
+                page_start=gap_start,
+                page_end=gap_end,
+            )
+        )
+    kept.sort(key=lambda s: (s.page_start, s.page_end))
+    return kept
+
+
 def reconcile(
     partials: List[Dict[str, Any]], source_file: str, page_count: int
 ) -> DocumentProfile:
@@ -248,7 +302,7 @@ def reconcile(
         effective_dates=_dedupe_strings(
             [d for p in partials for d in p.get("effective_dates", [])]
         ),
-        sections=_merge_sections(all_sections),
+        sections=_fill_coverage_gaps(_merge_sections(all_sections), page_count),
         glossary=_merge_glossary([p.get("glossary", []) for p in partials]),
         cross_references=_dedupe_strings(
             [c for p in partials for c in p.get("cross_references", [])]
