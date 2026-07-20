@@ -164,6 +164,40 @@ def test_coverage_guard_overlapping_sections_leave_no_false_gaps():
     assert all(s.section_type != "unmapped" for s in out)
 
 
+def test_sanitize_references_strips_leading_punctuation_and_empties():
+    values = [
+        ", Section II describes eligibility and entry dates",
+        "See Section III, Contributions",
+        " ,,  ",
+        "see section iii, contributions",  # case-insensitive duplicate
+        "— Refer to DOL Regulation §2550.404a-5",
+    ]
+    out = analyze._sanitize_references(values)
+    assert out == [
+        "Section II describes eligibility and entry dates",
+        "See Section III, Contributions",
+        "Refer to DOL Regulation §2550.404a-5",
+    ]
+
+
+def test_reconcile_sanitizes_cross_references():
+    partials = [
+        {
+            "doc_type": "SPD",
+            "title": "T",
+            "plan_name": "",
+            "sponsor": "",
+            "effective_dates": [],
+            "sections": [_section("A", 1, 2)],
+            "glossary": [],
+            "cross_references": [",  See Section V, Vesting", ""],
+            "notes": "",
+        }
+    ]
+    profile = analyze.reconcile(partials, source_file="x.pdf", page_count=2)
+    assert profile.cross_references == ["See Section V, Vesting"]
+
+
 # --- text-layer grounding ----------------------------------------------------
 
 # Physical 6-page layout: title page, TOC (printed numbering starts at 1

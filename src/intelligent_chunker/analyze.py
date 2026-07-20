@@ -30,6 +30,13 @@ PASS1_SYSTEM = (
     "terms the document explicitly defines, and notable cross-references "
     "between sections. Be thorough and faithful to the document -- do not "
     "invent sections or definitions.\n\n"
+    "Cross-references must be actual references -- one section, statute, "
+    "regulation, or attachment pointing to another -- written as complete "
+    "standalone entries, not sentence fragments or general statements from "
+    "the text. Keep the document's own wording for what is referenced: cite "
+    "statute and section names exactly as printed (for example, never write "
+    "'Internal Revenue Code Section 502(a)' when the document says 'Section "
+    "502(a) of ERISA').\n\n"
     "CRITICAL -- how to number pages: number pages by their PHYSICAL position "
     "in this PDF. The first page you are given is page 1, the next is page 2, "
     "and so on. IGNORE any page numbers printed in the document's headers or "
@@ -197,6 +204,22 @@ def _dedupe_strings(values: List[str]) -> List[str]:
             seen.add(key)
             out.append(v.strip())
     return out
+
+
+def _sanitize_references(values: List[str]) -> List[str]:
+    """Clean model-emitted cross-references before deduping.
+
+    Observed defects: entries arriving with leading punctuation from a
+    truncated sentence (", Section II describes ...") and entries that are
+    empty once stripped. Content errors (a paraphrase or a misnamed statute)
+    can't be fixed deterministically -- the Pass 1 prompt addresses those.
+    """
+    cleaned: List[str] = []
+    for v in values:
+        v = v.strip().lstrip(",;:.-–—— ").strip()
+        if v:
+            cleaned.append(v)
+    return _dedupe_strings(cleaned)
 
 
 def _merge_sections(raw_sections: List[Dict[str, Any]]) -> List[Section]:
@@ -467,7 +490,7 @@ def reconcile(
         ),
         sections=_fill_coverage_gaps(sections, page_count),
         glossary=_merge_glossary([p.get("glossary", []) for p in partials]),
-        cross_references=_dedupe_strings(
+        cross_references=_sanitize_references(
             [c for p in partials for c in p.get("cross_references", [])]
         ),
         notes=_first_nonempty([p.get("notes", "") for p in partials]),
