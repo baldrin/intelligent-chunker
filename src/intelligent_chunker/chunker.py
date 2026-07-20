@@ -9,6 +9,7 @@ intelligent chunking stays model-driven but nothing is ever silently truncated.
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
@@ -30,7 +31,10 @@ _PASS2_RULES = (
     "sub-headings, list items; (3) each chunk should stand on its own; (4) "
     "preserve wording faithfully -- do not summarize or invent text; (5) for "
     "every chunk, set page_start/page_end to the physical page(s) its text "
-    "appears on, counting the FIRST page you were given as page 1. Use the "
+    "appears on, counting the FIRST page you were given as page 1; (6) never "
+    "emit the same text twice -- each passage belongs in exactly one chunk, "
+    "and when the text cross-references another subsection, keep the "
+    "reference as written instead of copying the referenced text in. Use the "
     "global map to resolve references and pick relevant keywords."
 )
 
@@ -156,6 +160,73 @@ def _normalize_chunk_pages(
     return raw_chunks
 
 
+# Paragraphs shorter than this many words are exempt from deduplication:
+# table headers and schedule rows ("Years of Service | Vesting Percentage",
+# "less than 1 | 100.00") legitimately repeat within a section.
+_DEDUP_MIN_PARAGRAPH_WORDS = 25
+
+
+def _dedup_key(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def dedupe_raw_chunks(
+    raw_chunks: List[Dict[str, Any]], section_title: str
+) -> List[Dict[str, Any]]:
+    """Drop text the model emitted more than once within a section.
+
+    Observed failure modes despite the prompt rules: (a) a chunk re-emitted
+    verbatim, and (b) a chunk padded with paragraphs copied from an earlier
+    chunk (the model expanding a cross-reference by restating the referenced
+    text). Whole-chunk duplicates are dropped outright; duplicated paragraphs
+    of at least ``_DEDUP_MIN_PARAGRAPH_WORDS`` words are removed while the
+    chunk's own paragraphs survive. First occurrence always wins, so section
+    reading order is preserved.
+    """
+    seen_chunks: set = set()
+    seen_paragraphs: set = set()
+    out: List[Dict[str, Any]] = []
+    for rc in raw_chunks:
+        text = (rc.get("text") or "").strip()
+        if not text:
+            continue
+        if _dedup_key(text) in seen_chunks:
+            logger.warning(
+                "Section %r: dropping a chunk re-emitted verbatim",
+                section_title,
+            )
+            continue
+        kept: List[str] = []
+        dropped = 0
+        for para in re.split(r"\n\s*\n", text):
+            if len(para.split()) >= _DEDUP_MIN_PARAGRAPH_WORDS:
+                key = _dedup_key(para)
+                if key in seen_paragraphs:
+                    dropped += 1
+                    continue
+                seen_paragraphs.add(key)
+            kept.append(para)
+        if dropped:
+            logger.warning(
+                "Section %r: removed %d paragraph(s) duplicated from an "
+                "earlier chunk",
+                section_title,
+                dropped,
+            )
+        if not any(p.strip() for p in kept):
+            logger.warning(
+                "Section %r: dropping a chunk left empty after paragraph "
+                "dedup",
+                section_title,
+            )
+            continue
+        seen_chunks.add(_dedup_key(text))
+        if dropped:
+            rc = {**rc, "text": "\n\n".join(kept)}
+        out.append(rc)
+    return out
+
+
 def chunk_section(
     client: Any,
     config: ChunkerConfig,
@@ -248,7 +319,8 @@ def chunk_document(
 ) -> List[Chunk]:
     """Run Pass 2 over every section and return density-packed chunks.
 
-    Per section: get the model's chunks, split any that exceed the hard token
+    Per section: get the model's chunks, drop text emitted more than once
+    (see ``dedupe_raw_chunks``), split any chunk that exceeds the hard token
     ceiling, then greedily pack consecutive pieces up to the target size so
     chunks are substantial rather than tiny. Packing never crosses a section.
 
@@ -332,9 +404,10 @@ def chunk_document(
                 section.page_end,
             )
 
-        # 1) Normalize + enforce the hard token ceiling, into ordered pieces.
+        # 1) Drop duplicated text, then normalize + enforce the hard token
+        #    ceiling, into ordered pieces.
         pieces: List[Dict[str, Any]] = []
-        for rc in raw_chunks:
+        for rc in dedupe_raw_chunks(raw_chunks, section.title):
             text = (rc.get("text") or "").strip()
             if not text:
                 continue

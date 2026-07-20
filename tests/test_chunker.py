@@ -204,6 +204,70 @@ def test_chunk_document_packs_to_denser_chunks():
         assert c.token_count <= 12
 
 
+# --- section-level dedup -----------------------------------------------------
+
+# A paragraph long enough to be subject to dedup (>= 25 words).
+_LONG_PARA = " ".join(f"tax withholding rule {i}" for i in range(10))
+
+
+def test_dedupe_drops_chunk_reemitted_verbatim():
+    raw = [
+        {"text": _LONG_PARA, "keywords": ["a"], "cross_references": []},
+        # Same text with different wrapping/case still counts as a re-emit.
+        {"text": _LONG_PARA.upper().replace(" ", "  "), "keywords": ["b"],
+         "cross_references": []},
+    ]
+    out = chunker.dedupe_raw_chunks(raw, "S")
+    assert len(out) == 1
+    assert out[0]["keywords"] == ["a"]  # first occurrence wins
+
+
+def test_dedupe_removes_paragraphs_copied_from_earlier_chunk():
+    own = "Installment distributions are paid in substantially equal amounts."
+    raw = [
+        {"text": "intro\n\n" + _LONG_PARA, "keywords": [], "cross_references": []},
+        # Model padded a later chunk by restating the earlier paragraph.
+        {"text": own + "\n\n" + _LONG_PARA, "keywords": [], "cross_references": []},
+    ]
+    out = chunker.dedupe_raw_chunks(raw, "S")
+    assert len(out) == 2
+    assert out[1]["text"] == own
+    # A chunk that was *only* copied paragraphs disappears entirely.
+    raw.append({"text": _LONG_PARA, "keywords": [], "cross_references": []})
+    assert len(chunker.dedupe_raw_chunks(raw, "S")) == 2
+
+
+def test_dedupe_keeps_short_repeating_blocks():
+    # Table headers / schedule rows repeat legitimately and must survive.
+    row = "Years of Service | Vesting Percentage\nless than 1 | 100.00"
+    raw = [
+        {"text": "Schedule A:\n\n" + row, "keywords": [], "cross_references": []},
+        {"text": "Schedule B:\n\n" + row, "keywords": [], "cross_references": []},
+    ]
+    out = chunker.dedupe_raw_chunks(raw, "S")
+    assert len(out) == 2
+    assert row in out[0]["text"] and row in out[1]["text"]
+
+
+def test_chunk_document_dedupes_within_section():
+    payload = {
+        "chunks": [
+            {"text": _LONG_PARA, "keywords": [], "cross_references": []},
+            {"text": _LONG_PARA, "keywords": [], "cross_references": []},
+        ]
+    }
+    client = FakeClient([payload])
+    config = ChunkerConfig(max_tokens=200, target_tokens=100)
+    profile = DocumentProfile(
+        source_file="x.pdf",
+        page_count=1,
+        sections=[Section("S", "general", "", 1, 1)],
+    )
+    chunks = chunker.chunk_document(client, config, make_pdf(1), profile, COUNTER)
+    combined = "\n".join(c.text for c in chunks)
+    assert combined.count(_LONG_PARA) == 1
+
+
 def test_global_context_includes_section_and_map():
     profile = DocumentProfile(
         source_file="x.pdf",
