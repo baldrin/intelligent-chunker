@@ -2,6 +2,7 @@ from conftest import FakeClient, WordCounter, make_pdf
 
 from intelligent_chunker import chunker
 from intelligent_chunker.config import ChunkerConfig
+from intelligent_chunker.fidelity import match_key
 from intelligent_chunker.models import DocumentProfile, Section
 
 COUNTER = WordCounter()
@@ -205,8 +206,6 @@ def test_chunk_document_packs_to_denser_chunks():
 
 
 # --- per-chunk page grounding ------------------------------------------------
-
-from intelligent_chunker.fidelity import match_key
 
 _P2 = "The quick brown fox paragraph starts here and continues onward"
 _P3 = "eventually that same paragraph finishes with distinct closing words"
