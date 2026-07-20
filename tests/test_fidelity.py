@@ -134,6 +134,42 @@ def test_chunk_novelty_skips_unmapped_sections_and_tiny_chunks():
     assert flags == []
 
 
+def test_unmapped_section_low_coverage_does_not_warn(monkeypatch, caplog):
+    import logging
+
+    # Two exclusive-page sections whose chunks barely cover their pages:
+    # coverage is low for both, but only the mapped one should warn --
+    # proving the new gate keys on section_type, not the score.
+    # Long enough combined to clear the scanned-PDF floor (200 chars).
+    page1 = "reference words the chunk will mostly fail to cover on page one " * 3
+    page2 = "distinct reference words the chunk also fails to cover on page two " * 3
+    monkeypatch.setattr(fidelity, "extract_page_texts", lambda b: [page1, page2])
+    profile = DocumentProfile(
+        source_file="x.pdf",
+        page_count=2,
+        sections=[
+            Section("Unmapped pages 1-1", "unmapped", "", 1, 1),
+            Section("Mapped", "general", "", 2, 2),
+        ],
+    )
+    tiny = "barely overlap"
+    chunks = [
+        _chunk(0, tiny, ps=1, pe=1, section="Unmapped pages 1-1"),
+        _chunk(1, tiny, ps=2, pe=2, section="Mapped"),
+    ]
+    with caplog.at_level(logging.WARNING, logger="intelligent_chunker.fidelity"):
+        report = fidelity.fidelity_report(make_pdf(2), profile, chunks)
+
+    coverage_warnings = [
+        r.getMessage() for r in caplog.records if "coverage" in r.getMessage()
+    ]
+    assert any("Mapped" in m for m in coverage_warnings)  # mapped still warns
+    assert not any("Unmapped" in m for m in coverage_warnings)
+    # Both scores are still reported regardless of warning suppression.
+    titles = {s["title"] for s in report["sections"]}
+    assert titles == {"Unmapped pages 1-1", "Mapped"}
+
+
 def test_report_skips_pdfs_without_text_layer():
     # conftest's blank-page PDFs have no text layer -> scanned-PDF path.
     profile = DocumentProfile(

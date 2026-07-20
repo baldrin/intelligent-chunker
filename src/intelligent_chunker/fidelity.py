@@ -207,6 +207,11 @@ def fidelity_report(
 
         if has_shared:
             continue  # scores biased by neighbors' text; report but don't warn
+        if sec.section_type == "unmapped":
+            # Synthetic title/TOC sections: their pages hold navigation noise
+            # that is deliberately dropped or thinly chunked, so low coverage
+            # is expected, not a defect. Report the score, suppress the warning.
+            continue
         if score["coverage"] < COVERAGE_WARN_BELOW:
             logger.warning(
                 "Fidelity: section %r coverage %.2f -- text-layer content "
