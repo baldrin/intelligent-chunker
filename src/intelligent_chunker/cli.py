@@ -136,6 +136,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"and the document map to {args.profile} "
             f"({len(result.profile.sections)} sections)."
         )
+        if result.usage is not None and result.usage.calls:
+            print(f"Usage: {result.usage.summary()}")
         return 0
 
     if args.command == "view":

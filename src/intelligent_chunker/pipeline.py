@@ -11,7 +11,7 @@ from typing import List, Optional
 from .analyze import analyze_document
 from .chunker import chunk_document
 from .config import ChunkerConfig
-from .llm import make_client
+from .llm import UsageTracker, make_client
 from .models import Chunk, DocumentProfile
 from .pdf_io import read_pdf
 from .tokenizer import get_token_counter
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 class ChunkResult:
     profile: DocumentProfile
     chunks: List[Chunk]
+    usage: Optional[UsageTracker] = None
 
 
 def run(
@@ -41,11 +42,12 @@ def run(
     client = client or make_client()
     counter = get_token_counter(config.tokenizer_id)
     source_file = os.path.basename(pdf_path)
+    usage = UsageTracker()
 
     pdf_bytes = read_pdf(pdf_path)
 
     logger.info("Pass 1: analyzing %s", source_file)
-    profile = analyze_document(client, config, pdf_bytes, source_file)
+    profile = analyze_document(client, config, pdf_bytes, source_file, usage=usage)
     logger.info("Pass 1: found %d sections", len(profile.sections))
 
     # Persist the profile before Pass 2 so a failure partway through the
@@ -71,14 +73,16 @@ def run(
 
     try:
         chunks = chunk_document(
-            client, config, pdf_bytes, profile, counter, on_section=on_section
+            client, config, pdf_bytes, profile, counter,
+            on_section=on_section, usage=usage,
         )
     finally:
         if out_file is not None:
             out_file.close()
     logger.info("Pass 2: produced %d chunks", len(chunks))
+    logger.info("Usage: %s", usage.summary())
 
-    return ChunkResult(profile=profile, chunks=chunks)
+    return ChunkResult(profile=profile, chunks=chunks, usage=usage)
 
 
 def write_profile(profile: DocumentProfile, path: str) -> None:

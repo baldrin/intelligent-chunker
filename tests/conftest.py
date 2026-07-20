@@ -32,11 +32,22 @@ class _FakeBlock:
         self.text = text
 
 
+class FakeUsage:
+    """Deterministic usage object matching anthropic.types.Usage fields."""
+
+    def __init__(self):
+        self.input_tokens = 100
+        self.output_tokens = 10
+        self.cache_creation_input_tokens = 5
+        self.cache_read_input_tokens = 50
+
+
 class _FakeResponse:
     def __init__(self, payload: Dict[str, Any]):
         self.stop_reason = "end_turn"
         self.stop_details = None
         self.content = [_FakeBlock(json.dumps(payload))]
+        self.usage = FakeUsage()
 
 
 class _FakeStream:

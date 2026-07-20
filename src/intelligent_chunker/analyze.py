@@ -11,10 +11,10 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .config import ChunkerConfig
-from .llm import structured_call
+from .llm import UsageTracker, structured_call
 from .models import DocumentProfile, GlossaryTerm, Section
 from .pdf_io import PageBatch, document_block, iter_batches
 
@@ -107,7 +107,10 @@ _PASS1_INSTRUCTION = (
 
 
 def analyze_batch(
-    client: Any, config: ChunkerConfig, batch: PageBatch
+    client: Any,
+    config: ChunkerConfig,
+    batch: PageBatch,
+    usage: Optional[UsageTracker] = None,
 ) -> Dict[str, Any]:
     """Analyze one page-range batch; section pages are offset to absolute."""
     content = [
@@ -123,6 +126,7 @@ def analyze_batch(
         max_tokens=config.max_output_tokens,
         repair_attempts=config.max_repair_attempts,
         transient_retries=config.max_transient_retries,
+        usage=usage,
     )
     # Shift batch-relative page numbers to absolute document pages.
     for sec in raw.get("sections", []):
@@ -132,7 +136,11 @@ def analyze_batch(
 
 
 def analyze_document(
-    client: Any, config: ChunkerConfig, pdf_bytes: bytes, source_file: str
+    client: Any,
+    config: ChunkerConfig,
+    pdf_bytes: bytes,
+    source_file: str,
+    usage: Optional[UsageTracker] = None,
 ) -> DocumentProfile:
     """Run Pass 1 over the whole document and reconcile into one profile."""
     batches = iter_batches(
@@ -143,14 +151,17 @@ def analyze_document(
     )
     workers = min(max(1, config.pass1_concurrency), len(batches) or 1)
     if workers <= 1:
-        partials = [analyze_batch(client, config, b) for b in batches]
+        partials = [analyze_batch(client, config, b, usage=usage) for b in batches]
     else:
         # Batches are independent; fan out. pool.map preserves batch order,
         # which reconcile relies on (first non-empty metadata wins, and batch
         # 1 holds the title page). The Anthropic client is thread-safe.
         with ThreadPoolExecutor(max_workers=workers) as pool:
             partials = list(
-                pool.map(lambda b: analyze_batch(client, config, b), batches)
+                pool.map(
+                    lambda b: analyze_batch(client, config, b, usage=usage),
+                    batches,
+                )
             )
     page_count = batches[-1].page_end if batches else 0
     return reconcile(partials, source_file=source_file, page_count=page_count)

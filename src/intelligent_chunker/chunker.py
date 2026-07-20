@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from .config import ChunkerConfig
-from .llm import structured_call
+from .llm import UsageTracker, structured_call
 from .models import Chunk, DocumentProfile, Section
 from .pdf_io import document_block, encoded_size, slice_to_fit
 from .tokenizer import TokenCounter
@@ -163,6 +163,7 @@ def chunk_section(
     profile: DocumentProfile,
     section: Section,
     full_doc_block: Optional[Dict[str, Any]] = None,
+    usage: Optional[UsageTracker] = None,
 ) -> List[Dict[str, Any]]:
     """Ask the model for this section's chunks (raw dicts, pre token-guard).
 
@@ -190,6 +191,7 @@ def chunk_section(
             max_tokens=config.max_output_tokens,
             repair_attempts=config.max_repair_attempts,
             transient_retries=config.max_transient_retries,
+            usage=usage,
         )
         # Full-document mode: the model saw the whole PDF, pages are absolute.
         return _normalize_chunk_pages(
@@ -218,6 +220,7 @@ def chunk_section(
             max_tokens=config.max_output_tokens,
             repair_attempts=config.max_repair_attempts,
             transient_retries=config.max_transient_retries,
+            usage=usage,
         )
         # Sliced mode: the model saw only this slice, so its page 1 is the
         # slice's first absolute page.
@@ -239,6 +242,7 @@ def chunk_document(
     profile: DocumentProfile,
     counter: TokenCounter,
     on_section: Optional[Callable[[List[Chunk]], None]] = None,
+    usage: Optional[UsageTracker] = None,
 ) -> List[Chunk]:
     """Run Pass 2 over every section and return density-packed chunks.
 
@@ -279,7 +283,7 @@ def chunk_document(
         try:
             return chunk_section(
                 client, config, pdf_bytes, profile, section,
-                full_doc_block=full_doc_block,
+                full_doc_block=full_doc_block, usage=usage,
             )
         except Exception as exc:
             raise RuntimeError(
