@@ -164,6 +164,106 @@ def test_coverage_guard_overlapping_sections_leave_no_false_gaps():
     assert all(s.section_type != "unmapped" for s in out)
 
 
+# --- text-layer grounding ----------------------------------------------------
+
+# Physical 6-page layout: title page, TOC (printed numbering starts at 1
+# *after* it, so printed pages run two behind physical), then content. Beta's
+# heading sits mid-page 4 (shares the page with Alpha's tail); Gamma's opens
+# page 6. Page 4 also body-references Gamma ("in Section III. Gamma") -- a
+# non-heading occurrence that must not make Gamma ambiguous.
+_PAD = "lorem ipsum dolor sit amet " * 8  # >120 normalized chars
+
+_GROUND_PAGES = [
+    "Employee Handbook",
+    "Contents: I. Alpha .......... 1  II. Beta .......... 2  "
+    "III. Gamma .......... 4",
+    "HDR 1\nI.  ALPHA\nalpha body text",
+    "HDR 2\n" + _PAD + " as described in Section III. Gamma. "
+    "II.Beta\nbeta body text",
+    "HDR 3\nmore beta body text",
+    "HDR 4\nIII. GAMMA\ngamma body text",
+]
+
+
+def _ground_input():
+    from intelligent_chunker.models import Section
+
+    # Beta and Gamma claim printed page numbers (two behind physical), which
+    # also missorts Beta ahead of Alpha.
+    return [
+        Section.from_dict(_section("I. Alpha", 3, 3)),
+        Section.from_dict(_section("II. Beta", 2, 3)),
+        Section.from_dict(_section("III. Gamma", 4, 4)),
+    ]
+
+
+def test_ground_sections_corrects_printed_page_numbers():
+    out = analyze.ground_sections(_ground_input(), _GROUND_PAGES)
+    assert [s.title for s in out] == ["I. Alpha", "II. Beta", "III. Gamma"]
+    # Alpha ends on 4 (Beta's heading is mid-page: shared); Beta ends on 5
+    # (Gamma's heading opens page 6); Gamma's end can't precede its start.
+    assert [(s.page_start, s.page_end) for s in out] == [(3, 4), (4, 5), (6, 6)]
+
+
+def test_ground_sections_skips_ambiguous_and_unmatched_headings():
+    from intelligent_chunker.models import Section
+
+    pages = [
+        "Renewal Notice for the plan",
+        "some other content",
+        "Renewal Notice appears again",
+    ]
+    sections = [
+        Section.from_dict(_section("Renewal Notice", 2, 2)),  # two hits
+        Section.from_dict(_section("Nowhere Heading", 3, 3)),  # zero hits
+    ]
+    out = analyze.ground_sections(sections, pages)
+    assert [(s.page_start, s.page_end) for s in out] == [(2, 2), (3, 3)]
+
+
+def test_ground_sections_no_text_layer_is_a_no_op():
+    out = analyze.ground_sections(_ground_input(), ["", "", "", "", "", ""])
+    # Scanned PDF: everything untouched (callers pre-sort via _merge_sections).
+    assert [s.title for s in out] == ["I. Alpha", "II. Beta", "III. Gamma"]
+    assert [(s.page_start, s.page_end) for s in out] == [(3, 3), (2, 3), (4, 4)]
+
+
+def test_reconcile_grounds_before_filling_gaps():
+    partials = [
+        {
+            "doc_type": "SPD",
+            "title": "T",
+            "plan_name": "",
+            "sponsor": "",
+            "effective_dates": [],
+            "sections": [
+                _section("I. Alpha", 3, 3),
+                _section("II. Beta", 2, 3),
+                _section("III. Gamma", 4, 4),
+            ],
+            "glossary": [],
+            "cross_references": [],
+            "notes": "",
+        }
+    ]
+    profile = analyze.reconcile(
+        partials, source_file="x.pdf", page_count=6, page_texts=_GROUND_PAGES
+    )
+    # Grounded outline first, then the title/TOC pages fall out as unmapped.
+    assert [s.title for s in profile.sections] == [
+        "Unmapped pages 1-2",
+        "I. Alpha",
+        "II. Beta",
+        "III. Gamma",
+    ]
+    assert [(s.page_start, s.page_end) for s in profile.sections] == [
+        (1, 2),
+        (3, 4),
+        (4, 5),
+        (6, 6),
+    ]
+
+
 def test_analyze_document_parallel_matches_sequential():
     from conftest import FakeClient, make_pdf
 
