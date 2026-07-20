@@ -1,24 +1,27 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Load chunker output into Databricks Vector Search
+# MAGIC # Load chunker output into Databricks AI Search
+# MAGIC
+# MAGIC (Databricks renamed Vector Search to **AI Search**; the SDK is now
+# MAGIC `databricks-ai-search` and the old package is a deprecated shim.)
 # MAGIC
 # MAGIC Takes the Parquet tables produced by `intelligent-chunker export`
 # MAGIC (`chunks.parquet`, `documents.parquet`, `glossary.parquet`) and:
 # MAGIC
 # MAGIC 1. Loads them into Delta tables (Unity Catalog).
 # MAGIC 2. Computes **GTE-large v1.5** embeddings for `embedding_text`.
-# MAGIC 3. Creates a **Vector Search Delta Sync index** (self-managed embeddings).
+# MAGIC 3. Creates an **AI Search Delta Sync index** (self-managed embeddings).
 # MAGIC 4. Shows a filtered + hybrid query.
 # MAGIC
 # MAGIC **Prerequisites**
-# MAGIC - A Vector Search endpoint (created below if missing).
+# MAGIC - An AI Search endpoint (created below if missing).
 # MAGIC - The GTE-large v1.5 HTTP endpoint URL + token (stored as a secret).
 # MAGIC - The three Parquet files uploaded to a UC Volume.
 # MAGIC - `embedding_text` is the column to embed; `text` is what you return.
 
 # COMMAND ----------
 
-# MAGIC %pip install --quiet databricks-vectorsearch
+# MAGIC %pip install --quiet databricks-ai-search
 # MAGIC %restart_python
 
 # COMMAND ----------
@@ -232,13 +235,13 @@ display(spark.table(CHUNKS_TABLE).select("id", "section_title", "embedding").lim
 
 # COMMAND ----------
 
-# MAGIC %md ## 3. Create the Vector Search endpoint + indexes
+# MAGIC %md ## 3. Create the AI Search endpoint + indexes
 
 # COMMAND ----------
 
-from databricks.vector_search.client import VectorSearchClient
+from databricks.ai_search.client import AISearchClient
 
-vsc = VectorSearchClient(disable_notice=True)
+vsc = AISearchClient(disable_notice=True)
 
 existing = [e["name"] for e in vsc.list_endpoints().get("endpoints", [])]
 if VS_ENDPOINT not in existing:
@@ -321,13 +324,18 @@ for hit in search(
 # MAGIC - **Re-running the chunker**: `export` writes stable content-hash `id`s,
 # MAGIC   so reloading Parquet + a `TRIGGERED` `.sync()` updates changed rows.
 # MAGIC   Use `CONTINUOUS` pipeline_type if you want near-real-time sync.
-# MAGIC - **Databricks-computed embeddings (alternative to cell 2)**: if GTE is a
-# MAGIC   Model Serving endpoint, drop the embedding UDF and create the index with
-# MAGIC   `embedding_source_column="embedding_text"` +
-# MAGIC   `embedding_model_endpoint_name="<your-gte-serving-endpoint>"` instead of
-# MAGIC   `embedding_vector_column`/`embedding_dimension`. The index embeds for you.
-# MAGIC - **Reranking**: for precision, retrieve a wider `k` (e.g. 20) then rerank
-# MAGIC   with a cross-encoder before sending to the LLM.
+# MAGIC - **Databricks-computed embeddings (alternative to cell 2)**: the
+# MAGIC   Foundation Model API serves the same model as `databricks-gte-large-en`
+# MAGIC   (1024-dim, pay-per-token). Drop the embedding UDF and create the index
+# MAGIC   with `embedding_source_column="embedding_text"` +
+# MAGIC   `embedding_model_endpoint_name="databricks-gte-large-en"` instead of
+# MAGIC   `embedding_vector_column`/`embedding_dimension`. The index embeds for
+# MAGIC   you (queries too, so `search()` no longer needs to embed the question).
+# MAGIC - **Reranking**: for precision, retrieve a wider `k` (e.g. 20) and rerank
+# MAGIC   before sending to the LLM. AI Search now has this built in: pass
+# MAGIC   `reranker=DatabricksReranker(columns_to_rerank=["text"])` to
+# MAGIC   `similarity_search` (`from databricks.ai_search.reranker import
+# MAGIC   DatabricksReranker`).
 # MAGIC - **Cross-references**: after retrieval, optionally pull the sections named
 # MAGIC   in a hit's `cross_references` from `documents.sections_json` to make the
 # MAGIC   answer more comprehensive.
