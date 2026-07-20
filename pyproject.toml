@@ -7,9 +7,9 @@ name = "intelligent-chunker"
 version = "0.1.0"
 description = "Two-pass, model-native intelligent chunker for SPD PDFs (Claude Haiku + structure-aware chunking)."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "anthropic>=0.40",
+    "anthropic>=0.112,<1",
     "pypdf>=4.0",
     "pysbd>=0.3.4",
     "python-dotenv>=1.0",
@@ -21,7 +21,7 @@ dependencies = [
 tokenizer = ["tokenizers>=0.15"]
 # Parquet export for Databricks Vector Search (Delta-friendly typed tables).
 databricks = ["pyarrow>=14"]
-dev = ["pytest>=7.0", "pyarrow>=14"]
+dev = ["pytest>=7.0", "pyarrow>=14", "ruff>=0.5"]
 
 [project.scripts]
 intelligent-chunker = "intelligent_chunker.cli:main"
@@ -31,3 +31,17 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Databricks notebook source: `spark`/`dbutils`/`display` are injected
+# globals, and imports live inside notebook cells.
+"databricks/build_vector_index.py" = ["F821", "E402"]
+# Long lines inside the inlined HTML/CSS/JS template string.
+"src/intelligent_chunker/viewer.py" = ["E501"]
