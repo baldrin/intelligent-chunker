@@ -26,17 +26,51 @@ class ChunkResult:
     usage: Optional[UsageTracker] = None
 
 
+def completed_section_prefix(
+    sections: List[object], chunks: List[Chunk]
+) -> int:
+    """Longest prefix of ``sections`` that already has chunks on disk.
+
+    The chunks file is written strictly in section order, so the first
+    section with no chunks marks where an interrupted run stopped. A section
+    that legitimately produced zero chunks re-runs on resume -- harmless,
+    just a little repeated work.
+    """
+    titles_with_chunks = {c.section_title for c in chunks}
+    done = 0
+    for sec in sections:
+        if sec.title not in titles_with_chunks:
+            break
+        done += 1
+    return done
+
+
+def _read_chunks(path: str) -> List[Chunk]:
+    chunks: List[Chunk] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                chunks.append(Chunk.from_dict(json.loads(line)))
+    return chunks
+
+
 def run(
     pdf_path: str,
     config: Optional[ChunkerConfig] = None,
     out_path: Optional[str] = None,
     profile_path: Optional[str] = None,
     client: Optional[object] = None,
+    resume: bool = False,
 ) -> ChunkResult:
     """Chunk one PDF end to end.
 
     Returns the profile + chunks, and optionally writes ``chunks.jsonl`` and
     ``profile.json``. ``client`` can be injected (tests pass a fake).
+
+    With ``resume=True``, an existing ``profile_path`` skips Pass 1 and an
+    existing ``out_path`` skips every section that already finished, so an
+    interrupted run only re-pays for the unfinished tail.
     """
     config = config or ChunkerConfig()
     client = client or make_client()
@@ -46,23 +80,57 @@ def run(
 
     pdf_bytes = read_pdf(pdf_path)
 
-    logger.info("Pass 1: analyzing %s", source_file)
-    profile = analyze_document(client, config, pdf_bytes, source_file, usage=usage)
-    logger.info("Pass 1: found %d sections", len(profile.sections))
+    profile = None
+    if resume and profile_path and os.path.exists(profile_path):
+        with open(profile_path, "r", encoding="utf-8") as f:
+            profile = DocumentProfile.from_dict(json.load(f))
+        logger.info(
+            "Resume: loaded profile from %s (%d sections); skipping Pass 1",
+            profile_path,
+            len(profile.sections),
+        )
 
-    # Persist the profile before Pass 2 so a failure partway through the
-    # (many-call) chunking pass never costs the completed analysis.
-    if profile_path:
-        write_profile(profile, profile_path)
-        logger.info("Wrote profile to %s", profile_path)
+    if profile is None:
+        logger.info("Pass 1: analyzing %s", source_file)
+        profile = analyze_document(
+            client, config, pdf_bytes, source_file, usage=usage
+        )
+        logger.info("Pass 1: found %d sections", len(profile.sections))
+        # Persist the profile before Pass 2 so a failure partway through the
+        # (many-call) chunking pass never costs the completed analysis.
+        if profile_path:
+            write_profile(profile, profile_path)
+            logger.info("Wrote profile to %s", profile_path)
 
-    logger.info("Pass 2: chunking %d sections", len(profile.sections))
+    # On resume, keep chunks from every section that fully finished; the
+    # first section without chunks (and everything after) re-runs.
+    kept: List[Chunk] = []
+    remaining = list(profile.sections)
+    if resume and out_path and os.path.exists(out_path):
+        existing = _read_chunks(out_path)
+        done = completed_section_prefix(profile.sections, existing)
+        done_titles = {s.title for s in profile.sections[:done]}
+        kept = [c for c in existing if c.section_title in done_titles]
+        for i, chunk in enumerate(kept):  # renumber the kept prefix
+            chunk.chunk_index = i
+        remaining = list(profile.sections[done:])
+        logger.info(
+            "Resume: %d/%d sections already chunked (%d chunks kept)",
+            done,
+            len(profile.sections),
+            len(kept),
+        )
+
+    logger.info("Pass 2: chunking %d sections", len(remaining))
     out_file = None
     on_section = None
     if out_path:
         # Stream chunks to disk as each section finishes; on failure the file
         # holds every completed section instead of nothing.
         out_file = open(out_path, "w", encoding="utf-8")
+        for chunk in kept:
+            out_file.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+        out_file.flush()
 
         def on_section(section_chunks: List[Chunk]) -> None:
             for chunk in section_chunks:
@@ -72,14 +140,16 @@ def run(
             out_file.flush()
 
     try:
-        chunks = chunk_document(
+        new_chunks = chunk_document(
             client, config, pdf_bytes, profile, counter,
             on_section=on_section, usage=usage,
+            sections=remaining, start_index=len(kept),
         )
     finally:
         if out_file is not None:
             out_file.close()
-    logger.info("Pass 2: produced %d chunks", len(chunks))
+    chunks = kept + new_chunks
+    logger.info("Pass 2: produced %d chunks (%d new)", len(chunks), len(new_chunks))
     logger.info("Usage: %s", usage.summary())
 
     return ChunkResult(profile=profile, chunks=chunks, usage=usage)

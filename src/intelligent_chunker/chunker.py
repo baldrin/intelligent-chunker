@@ -243,6 +243,8 @@ def chunk_document(
     counter: TokenCounter,
     on_section: Optional[Callable[[List[Chunk]], None]] = None,
     usage: Optional[UsageTracker] = None,
+    sections: Optional[List[Section]] = None,
+    start_index: int = 0,
 ) -> List[Chunk]:
     """Run Pass 2 over every section and return density-packed chunks.
 
@@ -258,6 +260,10 @@ def chunk_document(
     ``on_section`` (if given) receives each section's finished chunks as soon
     as they exist, so callers can persist incrementally -- a failure partway
     through a long run then costs only the unfinished sections.
+
+    ``sections``/``start_index`` support resuming: chunk only the given
+    subset (default: all of ``profile.sections``) while keeping the full
+    profile as model context, numbering chunks from ``start_index``.
     """
     # Never pack past the hard ceiling even if target is misconfigured above it.
     pack_target = min(config.target_tokens, config.max_tokens)
@@ -277,7 +283,7 @@ def chunk_document(
         full_doc_block["cache_control"] = {"type": "ephemeral"}
         logger.info("Pass 2: using cached full-document mode")
 
-    sections = list(profile.sections)
+    sections = list(profile.sections) if sections is None else list(sections)
 
     def fetch(section: Section) -> List[Dict[str, Any]]:
         try:
@@ -313,7 +319,7 @@ def chunk_document(
         results = fanned_out()
 
     chunks: List[Chunk] = []
-    index = 0
+    index = start_index
     for pos, (section, raw_chunks) in enumerate(zip(sections, results), start=1):
         logger.info(
             "Pass 2: section %d/%d done: %s", pos, len(sections), section.title

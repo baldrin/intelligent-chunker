@@ -68,6 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parallel Pass 2 section requests (1 = sequential).",
     )
     chunk.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse an existing profile/chunks file from an interrupted run: "
+        "skip Pass 1 if the profile exists and re-run only unfinished "
+        "sections.",
+    )
+    chunk.add_argument(
         "-v", "--verbose", action="store_true", help="Verbose logging."
     )
 
@@ -127,6 +134,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 config=config,
                 out_path=args.out,
                 profile_path=args.profile,
+                resume=args.resume,
             )
         except FileNotFoundError as exc:
             print(f"Input not found: {exc.filename or exc}", file=sys.stderr)
