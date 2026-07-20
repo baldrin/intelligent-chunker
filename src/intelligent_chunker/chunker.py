@@ -27,7 +27,9 @@ _PASS2_RULES = (
     "chunks suitable for embedding. Rules: (1) never split mid-word or "
     "mid-sentence; (2) break only at meaningful boundaries -- paragraphs, "
     "sub-headings, list items; (3) each chunk should stand on its own; (4) "
-    "preserve wording faithfully -- do not summarize or invent text. Use the "
+    "preserve wording faithfully -- do not summarize or invent text; (5) for "
+    "every chunk, set page_start/page_end to the physical page(s) its text "
+    "appears on, counting the FIRST page you were given as page 1. Use the "
     "global map to resolve references and pick relevant keywords."
 )
 
@@ -67,8 +69,16 @@ _CHUNKS_SCHEMA: Dict[str, Any] = {
                         "type": "array",
                         "items": {"type": "string"},
                     },
+                    "page_start": {"type": "integer"},
+                    "page_end": {"type": "integer"},
                 },
-                "required": ["text", "keywords", "cross_references"],
+                "required": [
+                    "text",
+                    "keywords",
+                    "cross_references",
+                    "page_start",
+                    "page_end",
+                ],
             },
         }
     },
@@ -118,6 +128,33 @@ def _sizing_instruction(config: ChunkerConfig) -> str:
     )
 
 
+def _normalize_chunk_pages(
+    raw_chunks: List[Dict[str, Any]],
+    offset: int,
+    sec_start: int,
+    sec_end: int,
+) -> List[Dict[str, Any]]:
+    """Shift model-reported chunk pages to absolute and clamp to the section.
+
+    The model numbers pages relative to the PDF it was given (first page = 1),
+    so sliced sections need ``offset`` added. A missing or nonsensical range
+    falls back to the whole section's range -- provenance degrades to what we
+    guaranteed before per-chunk pages existed, never to garbage.
+    """
+    for rc in raw_chunks:
+        try:
+            ps = int(rc.get("page_start", 0)) + offset
+            pe = int(rc.get("page_end", 0)) + offset
+        except (TypeError, ValueError):
+            ps, pe = 0, 0
+        if ps < sec_start or ps > sec_end or pe < ps:
+            ps, pe = sec_start, sec_end
+        else:
+            pe = min(pe, sec_end)
+        rc["page_start"], rc["page_end"] = ps, pe
+    return raw_chunks
+
+
 def chunk_section(
     client: Any,
     config: ChunkerConfig,
@@ -153,7 +190,10 @@ def chunk_section(
             repair_attempts=config.max_repair_attempts,
             transient_retries=config.max_transient_retries,
         )
-        return raw.get("chunks", [])
+        # Full-document mode: the model saw the whole PDF, pages are absolute.
+        return _normalize_chunk_pages(
+            raw.get("chunks", []), 0, page_start, page_end
+        )
 
     instruction = _global_context(profile, section) + "\n\n" + _sizing_instruction(
         config
@@ -178,7 +218,16 @@ def chunk_section(
             repair_attempts=config.max_repair_attempts,
             transient_retries=config.max_transient_retries,
         )
-        chunks.extend(raw.get("chunks", []))
+        # Sliced mode: the model saw only this slice, so its page 1 is the
+        # slice's first absolute page.
+        chunks.extend(
+            _normalize_chunk_pages(
+                raw.get("chunks", []),
+                batch.page_offset,
+                batch.page_start,
+                batch.page_end,
+            )
+        )
     return chunks
 
 
@@ -251,6 +300,9 @@ def chunk_document(
                         "text": sub,
                         "keywords": list(rc.get("keywords", [])),
                         "cross_references": list(rc.get("cross_references", [])),
+                        # Splits inherit the parent chunk's page range.
+                        "page_start": rc.get("page_start"),
+                        "page_end": rc.get("page_end"),
                     }
                 )
 
@@ -265,8 +317,8 @@ def chunk_document(
                     section_title=section.title,
                     section_type=section.section_type,
                     section_summary=section.summary,
-                    page_start=section.page_start,
-                    page_end=section.page_end,
+                    page_start=pc.get("page_start") or section.page_start,
+                    page_end=pc.get("page_end") or section.page_end,
                     keywords=pc["keywords"],
                     cross_references=pc["cross_references"],
                     token_count=counter.count(pc["text"]),
@@ -294,15 +346,18 @@ def pack_chunks(
 ) -> List[Dict[str, Any]]:
     """Greedily merge consecutive pieces up to ``target_tokens``.
 
-    Pieces are joined with a blank line (preserving paragraph boundaries) and
-    their keyword/cross-reference lists are unioned. A piece already at/over
-    the target stands alone -- packing only ever combines, never splits, so it
-    cannot push a chunk past the hard ceiling the caller already enforced.
+    Pieces are joined with a blank line (preserving paragraph boundaries),
+    their keyword/cross-reference lists are unioned, and their page ranges
+    merge to the min/max span. A piece already at/over the target stands
+    alone -- packing only ever combines, never splits, so it cannot push a
+    chunk past the hard ceiling the caller already enforced.
     """
     result: List[Dict[str, Any]] = []
     buf_text: List[str] = []
     buf_kw: List[str] = []
     buf_xref: List[str] = []
+    buf_ps: List[int] = []
+    buf_pe: List[int] = []
 
     def flush() -> None:
         if buf_text:
@@ -311,11 +366,15 @@ def pack_chunks(
                     "text": "\n\n".join(buf_text),
                     "keywords": _dedupe_preserve_order(buf_kw),
                     "cross_references": _dedupe_preserve_order(buf_xref),
+                    "page_start": min(buf_ps) if buf_ps else None,
+                    "page_end": max(buf_pe) if buf_pe else None,
                 }
             )
             buf_text.clear()
             buf_kw.clear()
             buf_xref.clear()
+            buf_ps.clear()
+            buf_pe.clear()
 
     for piece in pieces:
         text = piece["text"]
@@ -326,6 +385,10 @@ def pack_chunks(
         buf_text.append(text)
         buf_kw.extend(piece.get("keywords", []))
         buf_xref.extend(piece.get("cross_references", []))
+        if piece.get("page_start"):
+            buf_ps.append(int(piece["page_start"]))
+        if piece.get("page_end"):
+            buf_pe.append(int(piece["page_end"]))
     flush()
     return result
 

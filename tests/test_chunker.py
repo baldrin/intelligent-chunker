@@ -91,6 +91,65 @@ def test_pack_chunks_merges_small_pieces_up_to_target():
         assert p["text"]
 
 
+def test_normalize_chunk_pages_offsets_and_clamps():
+    raw = [
+        # Slice-relative 1-2 with offset 4 -> absolute 5-6.
+        {"text": "a", "page_start": 1, "page_end": 2},
+        # End past the section: clamped down to sec_end.
+        {"text": "b", "page_start": 3, "page_end": 9},
+        # Missing pages -> falls back to the section range.
+        {"text": "c"},
+        # Inverted range -> falls back to the section range.
+        {"text": "d", "page_start": 4, "page_end": 1},
+    ]
+    out = chunker._normalize_chunk_pages(raw, offset=4, sec_start=5, sec_end=8)
+    assert [(c["page_start"], c["page_end"]) for c in out] == [
+        (5, 6),
+        (7, 8),
+        (5, 8),
+        (5, 8),
+    ]
+
+
+def test_pack_chunks_merges_page_ranges():
+    pieces = [
+        {"text": "a b", "keywords": [], "cross_references": [],
+         "page_start": 3, "page_end": 3},
+        {"text": "c d", "keywords": [], "cross_references": [],
+         "page_start": 4, "page_end": 5},
+    ]
+    packed = chunker.pack_chunks(pieces, target_tokens=10, counter=COUNTER)
+    assert len(packed) == 1
+    assert packed[0]["page_start"] == 3 and packed[0]["page_end"] == 5
+
+
+def test_pack_chunks_without_pages_yields_none():
+    pieces = [{"text": "a b", "keywords": [], "cross_references": []}]
+    packed = chunker.pack_chunks(pieces, target_tokens=10, counter=COUNTER)
+    assert packed[0]["page_start"] is None and packed[0]["page_end"] is None
+
+
+def test_chunk_document_uses_model_pages_and_falls_back_to_section():
+    payload = {
+        "chunks": [
+            {"text": "a b c", "keywords": [], "cross_references": [],
+             "page_start": 2, "page_end": 2},
+            {"text": "d e f", "keywords": [], "cross_references": []},
+        ]
+    }
+    client = FakeClient([payload])
+    config = ChunkerConfig(max_tokens=100, target_tokens=3)
+    profile = DocumentProfile(
+        source_file="x.pdf",
+        page_count=3,
+        sections=[Section("S", "general", "", 1, 3)],
+    )
+    chunks = chunker.chunk_document(client, config, make_pdf(3), profile, COUNTER)
+    assert (chunks[0].page_start, chunks[0].page_end) == (2, 2)
+    # No model pages -> normalize fell back to the whole section range.
+    assert (chunks[1].page_start, chunks[1].page_end) == (1, 3)
+
+
 def test_pack_chunks_never_exceeds_target_when_pieces_fit():
     pieces = [
         {"text": f"w{i}", "keywords": [], "cross_references": []} for i in range(10)
