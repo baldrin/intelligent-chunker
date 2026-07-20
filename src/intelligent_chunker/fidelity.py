@@ -16,6 +16,11 @@ share a page, so a section's reference text includes its neighbors' words and
 coverage reads low even for a perfect transcription. Sections with shared
 pages are marked ``shared_pages: true`` and never warned about.
 
+A per-chunk pass additionally scores every chunk against its own page range
+and reports the offenders (``chunks`` in the report): high novelty there
+localizes invented lines or text attributed to the wrong pages down to a
+single chunk, which section-level scores can't do.
+
 The comparison is deliberately rough: headers/footers repeat per page,
 hyphenation and ligatures differ between extractors, and scanned PDFs have no
 text layer at all (the report is then skipped). Scores are advisory signals,
@@ -104,6 +109,77 @@ def sections_with_shared_pages(sections: List[Any]) -> List[bool]:
     ]
 
 
+# Chunks shorter than this many words give meaninglessly noisy per-chunk
+# novelty ratios (a heading fragment can be 100% "novel" by accident).
+CHUNK_NOVELTY_MIN_WORDS = 20
+
+# For flagged chunks, report the specific lines that are mostly absent from
+# the chunk's pages -- the actionable detail for a human reviewer.
+_NOVEL_LINE_MIN_WORDS = 4
+_NOVEL_LINE_ABSENT_FRACTION = 0.5
+_NOVEL_LINES_MAX = 3
+
+
+def chunk_novelty_flags(
+    page_texts: List[str], profile: DocumentProfile, chunks: List[Chunk]
+) -> List[Dict[str, Any]]:
+    """Score each chunk against its own page range; return the offenders.
+
+    A chunk is flagged when its novelty against its claimed pages exceeds
+    ``NOVELTY_WARN_ABOVE`` (text broadly misattributed or misplaced) OR when
+    any single line is mostly made of words absent from those pages (a
+    localized invented line -- too small to move the whole-chunk ratio, which
+    is exactly how a fabricated sentence hides). Chunks in synthetic
+    "unmapped" sections are skipped: title/TOC pages produce junk ratios and
+    their content is already known noise.
+    """
+    unmapped = {
+        s.title for s in profile.sections if s.section_type == "unmapped"
+    }
+    flags: List[Dict[str, Any]] = []
+    for chunk in chunks:
+        if chunk.section_title in unmapped:
+            continue
+        if len(chunk.text.split()) < CHUNK_NOVELTY_MIN_WORDS:
+            continue
+        start = max(1, min(chunk.page_start, len(page_texts)))
+        end = max(start, min(chunk.page_end, len(page_texts)))
+        reference = "\n".join(page_texts[start - 1 : end])
+        score = score_texts(reference, chunk.text)
+        ref_words = set(_WORD_RE.findall(reference.lower()))
+        novel_lines: List[str] = []
+        for line in chunk.text.splitlines():
+            words = _WORD_RE.findall(line.lower())
+            if len(words) < _NOVEL_LINE_MIN_WORDS:
+                continue
+            absent = sum(1 for w in words if w not in ref_words)
+            if absent / len(words) >= _NOVEL_LINE_ABSENT_FRACTION:
+                novel_lines.append(line.strip())
+        if score["novelty"] <= NOVELTY_WARN_ABOVE and not novel_lines:
+            continue
+        flags.append(
+            {
+                "chunk_index": chunk.chunk_index,
+                "section": chunk.section_title,
+                "page_start": chunk.page_start,
+                "page_end": chunk.page_end,
+                "novelty": score["novelty"],
+                "novel_lines": novel_lines[:_NOVEL_LINES_MAX],
+            }
+        )
+        logger.warning(
+            "Fidelity: chunk %d (pages %d-%d, section %r) novelty %.2f -- "
+            "contains text not found on its pages%s",
+            chunk.chunk_index,
+            chunk.page_start,
+            chunk.page_end,
+            chunk.section_title,
+            score["novelty"],
+            "; e.g. %r" % novel_lines[0] if novel_lines else "",
+        )
+    return flags
+
+
 def fidelity_report(
     pdf_bytes: bytes, profile: DocumentProfile, chunks: List[Chunk]
 ) -> Dict[str, Any]:
@@ -164,4 +240,9 @@ def fidelity_report(
             document["novelty"],
         )
 
-    return {"status": "ok", "document": document, "sections": sections}
+    return {
+        "status": "ok",
+        "document": document,
+        "sections": sections,
+        "chunks": chunk_novelty_flags(page_texts, profile, chunks),
+    }

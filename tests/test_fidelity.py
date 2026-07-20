@@ -65,6 +65,75 @@ def test_shared_page_detection():
     assert fidelity.sections_with_shared_pages(exclusive) == [False, False]
 
 
+# --- per-chunk novelty -------------------------------------------------------
+
+_PAGE = (
+    "The trustee is responsible for trusteeing the plan assets and holds "
+    "them in possession under the trust agreement for participants."
+)
+
+
+def _chunk(idx, text, ps=1, pe=1, section="S"):
+    return Chunk(
+        text=text,
+        source_file="x.pdf",
+        chunk_index=idx,
+        section_title=section,
+        section_type="general",
+        section_summary="",
+        page_start=ps,
+        page_end=pe,
+    )
+
+
+def _profile(sections):
+    return DocumentProfile(source_file="x.pdf", page_count=2, sections=sections)
+
+
+def test_chunk_novelty_clean_chunk_not_flagged():
+    profile = _profile([Section("S", "general", "", 1, 1)])
+    flags = fidelity.chunk_novelty_flags([_PAGE], profile, [_chunk(0, _PAGE)])
+    assert flags == []
+
+
+def test_chunk_novelty_flags_invented_line_and_reports_it():
+    invented = "Call the hotline at 555-0199 to claim your wellness voucher."
+    text = _PAGE + "\n" + invented
+    profile = _profile([Section("S", "general", "", 1, 1)])
+    flags = fidelity.chunk_novelty_flags([_PAGE], profile, [_chunk(0, text)])
+    assert len(flags) == 1
+    assert flags[0]["chunk_index"] == 0
+    assert invented in flags[0]["novel_lines"]
+
+
+def test_chunk_novelty_flags_wrong_page_attribution():
+    other_page = "Completely different content about claims and appeals here."
+    profile = _profile([Section("S", "general", "", 1, 2)])
+    # Chunk text lives on page 1 but claims page 2.
+    flags = fidelity.chunk_novelty_flags(
+        [_PAGE, other_page], profile, [_chunk(0, _PAGE, ps=2, pe=2)]
+    )
+    assert len(flags) == 1
+    assert flags[0]["novelty"] > fidelity.NOVELTY_WARN_ABOVE
+
+
+def test_chunk_novelty_skips_unmapped_sections_and_tiny_chunks():
+    profile = _profile(
+        [
+            Section("Unmapped pages 1-2", "unmapped", "", 1, 1),
+            Section("S", "general", "", 2, 2),
+        ]
+    )
+    chunks = [
+        # Junk in an unmapped section: skipped even though fully novel.
+        _chunk(0, _PAGE, section="Unmapped pages 1-2"),
+        # Tiny chunk: below the word floor, skipped.
+        _chunk(1, "short novel fragment here", ps=2, pe=2),
+    ]
+    flags = fidelity.chunk_novelty_flags(["different words"] * 2, profile, chunks)
+    assert flags == []
+
+
 def test_report_skips_pdfs_without_text_layer():
     # conftest's blank-page PDFs have no text layer -> scanned-PDF path.
     profile = DocumentProfile(
