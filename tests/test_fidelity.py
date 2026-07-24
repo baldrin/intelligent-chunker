@@ -195,3 +195,28 @@ def test_report_skips_pdfs_without_text_layer():
     report = fidelity.fidelity_report(make_pdf(2), profile, [chunk])
     assert report["status"] == "skipped"
     assert "text layer" in report["reason"]
+
+
+def test_novel_line_hint_reports_invented_text():
+    invented = "Call the hotline at 555-0199 to claim your wellness voucher."
+    text = _PAGE + "\n" + invented
+    profile = _profile([Section("S", "general", "", 1, 1)])
+    flags = fidelity.chunk_novelty_flags([_PAGE], profile, [_chunk(0, text)])
+    idx = flags[0]["novel_lines"].index(invented)
+    assert "not in the text layer" in flags[0]["novel_line_hints"][idx]
+
+
+def test_novel_line_hint_locates_misattributed_text():
+    # A line missing from the chunk's claimed page but present on page 3
+    # should be triaged as misattribution, naming the page.
+    elsewhere = "Orthopedic shoes and custom molded foot orthotics are covered."
+    text = _PAGE + "\n" + elsewhere
+    profile = _profile([Section("S", "general", "", 1, 3)])
+    flags = fidelity.chunk_novelty_flags(
+        [_PAGE, "unrelated middle page filler", elsewhere],
+        profile,
+        [_chunk(0, text)],
+    )
+    idx = flags[0]["novel_lines"].index(elsewhere)
+    assert "found on page 3" in flags[0]["novel_line_hints"][idx]
+    assert "misattributed" in flags[0]["novel_line_hints"][idx]

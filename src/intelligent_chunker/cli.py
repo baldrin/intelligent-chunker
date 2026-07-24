@@ -281,8 +281,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             if flagged:
                 print(f"Flagged chunks: {len(flagged)}")
                 for f_ in flagged:
+                    hints = f_.get("novel_line_hints") or []
                     line = (
                         f"; e.g. {f_['novel_lines'][0]!r}"
+                        + (f" [{hints[0]}]" if hints else "")
                         if f_["novel_lines"]
                         else ""
                     )
