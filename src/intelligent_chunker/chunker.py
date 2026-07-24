@@ -182,9 +182,66 @@ _CHUNK_MATCH_MIN_CHARS = 15
 
 # When an edge finds nothing inside the section's pages, retry this many
 # pages beyond each end. Models drift page labels (printed page numbers often
-# differ from physical position by a cover page or two), and drifted text sits
-# just outside the claimed range, where the in-range search can't see it.
-_GROUND_MARGIN_PAGES = 2
+# differ from physical position by several pages of unnumbered front matter),
+# and drifted text sits just outside the claimed range, where the in-range
+# search can't see it.
+_GROUND_MARGIN_PAGES = 3
+
+# Word-overlap fallback (order-immune) for when substring matching fails:
+# extraction can scramble word order (hanging-indent lists, table layouts),
+# which defeats contiguous matching while leaving the words themselves in the
+# layer. Only words appearing on few pages document-wide count, so shared
+# boilerplate vocabulary ("plan", "coverage", ...) can't produce false hits.
+_RARE_WORD_MAX_DOC_PAGES = 3  # a word on <= this many pages is distinctive
+_RARE_WORDS_MIN = 5  # need at least this many distinctive words to try
+_WORD_FALLBACK_MIN_COVERED = 0.5  # located pages must hold half the rare words
+_WORD_FALLBACK_MAX_SPAN = 3  # a single piece never spans more pages than this
+_ADJACENT_PAGE_SCORE_FRACTION = 0.25  # extend to neighbors with >= this share
+
+_WORDISH_RE = re.compile(r"[a-z0-9]{4,}")
+
+
+def _locate_by_words(
+    text: str,
+    page_words: List[set],
+    doc_freq: Dict[str, int],
+    lo: int,
+    hi: int,
+) -> Optional[tuple]:
+    """Locate ``text`` in pages [lo, hi] by its distinctive words, or None."""
+    rare = {
+        w
+        for w in _WORDISH_RE.findall(text.lower())
+        if 0 < doc_freq.get(w, 0) <= _RARE_WORD_MAX_DOC_PAGES
+    }
+    if len(rare) < _RARE_WORDS_MIN:
+        return None
+    scores = {p: len(rare & page_words[p - 1]) for p in range(lo, hi + 1)}
+    best = max(scores, key=lambda p: scores[p])
+    if scores[best] == 0:
+        return None
+    # Grow a contiguous run around the best page: a piece can straddle pages,
+    # so neighbors holding a meaningful share of the rare words belong too.
+    floor = max(1, int(scores[best] * _ADJACENT_PAGE_SCORE_FRACTION))
+    start = end = best
+    while (
+        start - 1 >= lo
+        and scores[start - 1] >= floor
+        and end - start + 1 < _WORD_FALLBACK_MAX_SPAN
+    ):
+        start -= 1
+    while (
+        end + 1 <= hi
+        and scores[end + 1] >= floor
+        and end - start + 1 < _WORD_FALLBACK_MAX_SPAN
+    ):
+        end += 1
+    covered = set()
+    for p in range(start, end + 1):
+        covered |= rare & page_words[p - 1]
+    if len(covered) / len(rare) < _WORD_FALLBACK_MIN_COVERED:
+        return None
+    return start, end
 
 
 def ground_chunk_pages(
@@ -192,6 +249,7 @@ def ground_chunk_pages(
     norm_pages: List[str],
     sec_start: int,
     sec_end: int,
+    raw_pages: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Snap each piece's page range to where its text appears in the section.
 
@@ -203,6 +261,12 @@ def ground_chunk_pages(
     on each end, so text whose label drifted out of the section can still be
     located; the narrow pass stays first because the section range is also
     what disambiguates text repeated elsewhere in the document.
+
+    When ``raw_pages`` (the unnormalized text layer) is given and neither
+    edge matched at all, a word-overlap fallback locates the piece by its
+    distinctive words -- immune to the extraction word-scrambling (hanging
+    indents, tables) that defeats substring matching.
+
     Contradictory hits (start after end) distrust both. Pieces are mutated
     in place and returned.
     """
@@ -210,6 +274,14 @@ def ground_chunk_pages(
     hi = min(sec_end, len(norm_pages))
     wide_lo = max(1, sec_start - _GROUND_MARGIN_PAGES)
     wide_hi = min(sec_end + _GROUND_MARGIN_PAGES, len(norm_pages))
+
+    page_words: Optional[List[set]] = None
+    doc_freq: Dict[str, int] = {}
+    if raw_pages is not None:
+        page_words = [set(_WORDISH_RE.findall(t.lower())) for t in raw_pages]
+        for ws in page_words:
+            for w in ws:
+                doc_freq[w] = doc_freq.get(w, 0) + 1
 
     def locate(needle: str) -> Optional[int]:
         hits = [p for p in range(lo, hi + 1) if needle in norm_pages[p - 1]]
@@ -229,6 +301,12 @@ def ground_chunk_pages(
         suffix = key[-_CHUNK_MATCH_CHARS:]
         ps = locate(prefix)
         pe = locate(suffix)
+        if ps is None and pe is None and page_words is not None:
+            span = _locate_by_words(
+                pc.get("text") or "", page_words, doc_freq, wide_lo, wide_hi
+            )
+            if span is not None:
+                ps, pe = span
         if ps is not None and pe is not None and ps > pe:
             continue  # both matched but out of order: trust neither
         old = (pc.get("page_start"), pc.get("page_end"))
@@ -510,7 +588,8 @@ def chunk_document(
 
     # Normalized text layer for per-chunk page grounding (empty for scanned
     # PDFs, in which case the model's self-reported pages stand).
-    norm_pages = [match_key(t) for t in extract_page_texts(pdf_bytes)]
+    raw_pages = extract_page_texts(pdf_bytes)
+    norm_pages = [match_key(t) for t in raw_pages]
     has_text_layer = any(norm_pages)
 
     # Shared across worker threads so one context overflow downgrades the
@@ -612,6 +691,7 @@ def chunk_document(
                 norm_pages,
                 max(1, min(section.page_start, profile.page_count)),
                 max(section.page_start, min(section.page_end, profile.page_count)),
+                raw_pages=raw_pages,
             )
         section_chunks: List[Chunk] = []
         for pc in packed:
