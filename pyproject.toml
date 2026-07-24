@@ -22,7 +22,7 @@ dependencies = [
 tokenizer = ["tokenizers>=0.15"]
 # Parquet export for Databricks AI Search (Delta-friendly typed tables).
 databricks = ["pyarrow>=14"]
-dev = ["pytest>=7.0", "pyarrow>=14", "ruff>=0.5"]
+dev = ["pytest>=7.0", "pyarrow>=14", "ruff>=0.5", "tokenizers>=0.15"]
 
 [project.scripts]
 intelligent-chunker = "intelligent_chunker.cli:main"

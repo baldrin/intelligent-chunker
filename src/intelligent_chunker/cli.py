@@ -16,6 +16,7 @@ from .config import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_TARGET_TOKENS,
+    GTE_TOKENIZER_ID,
     ChunkerConfig,
 )
 from .pipeline import run
@@ -85,6 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4,
         help="Parallel Pass 2 section requests (1 = sequential).",
+    )
+    chunk.add_argument(
+        "--tokenizer",
+        default=os.environ.get("CHUNKER_TOKENIZER", GTE_TOKENIZER_ID),
+        help="Hugging Face model id, or a path to a local tokenizer.json for "
+        "offline use (also via CHUNKER_TOKENIZER).",
     )
     chunk.add_argument(
         "--no-fidelity",
@@ -177,6 +184,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             pass1_concurrency=args.pass1_concurrency,
             pass2_concurrency=args.pass2_concurrency,
             max_request_mb=args.max_request_mb,
+            tokenizer_id=args.tokenizer,
         )
         try:
             result = run(
