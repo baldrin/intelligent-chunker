@@ -1,3 +1,4 @@
+import pytest
 from conftest import FakeClient, WordCounter, make_pdf
 
 from intelligent_chunker import chunker
@@ -441,3 +442,61 @@ def test_chunk_document_reports_sections_incrementally():
     )
     assert len(seen) == 2  # called once per section
     assert sum(seen) == len(chunks)
+
+
+def _two_section_profile() -> DocumentProfile:
+    return DocumentProfile(
+        source_file="x.pdf",
+        page_count=2,
+        sections=[
+            Section(
+                title="Eligibility",
+                section_type="eligibility",
+                summary="who is covered",
+                page_start=1,
+                page_end=1,
+            ),
+            Section(
+                title="Benefits",
+                section_type="benefits",
+                summary="what is covered",
+                page_start=2,
+                page_end=2,
+            ),
+        ],
+    )
+
+
+def test_context_overflow_falls_back_to_sliced_mode():
+    # A document can pass the 100-page cap for cached full-document mode yet
+    # overflow the context window (pages bill text + image tokens). The API's
+    # 400 must downgrade the run to sliced sections, not kill it.
+    overflow = Exception(
+        "Error code: 400 - prompt is too long: 200275 tokens > 200000 maximum"
+    )
+    payload = {"chunks": [{"text": "hello world"}]}
+    client = FakeClient([overflow, payload, payload])
+    config = ChunkerConfig(pass2_concurrency=1)
+
+    chunks = chunker.chunk_document(
+        client, config, make_pdf(2), _two_section_profile(), COUNTER
+    )
+
+    assert len(chunks) == 2  # both sections still chunked
+    calls = client.messages.calls
+    assert len(calls) == 3  # failed full-doc call + one sliced call per section
+    doc_blocks = [c["messages"][0]["content"][0] for c in calls]
+    assert "cache_control" in doc_blocks[0]  # the full-document attempt
+    assert "cache_control" not in doc_blocks[1]  # retried sliced
+    assert "cache_control" not in doc_blocks[2]  # later sections never retry
+
+
+def test_non_overflow_errors_still_fail_the_section():
+    client = FakeClient([Exception("boom")])
+    config = ChunkerConfig(pass2_concurrency=1)
+    with pytest.raises(RuntimeError, match="Pass 2 failed on section"):
+        list(
+            chunker.chunk_document(
+                client, config, make_pdf(2), _two_section_profile(), COUNTER
+            )
+        )

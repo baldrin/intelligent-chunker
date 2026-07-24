@@ -73,9 +73,13 @@ class _FakeMessages:
 
     def _next(self, kwargs: Dict[str, Any]) -> _FakeResponse:
         self.calls.append(kwargs)
-        # Cycle through canned payloads (last one repeats).
+        # Cycle through canned payloads (last one repeats). An Exception in
+        # the list is raised instead of returned, to script API failures.
         idx = min(len(self.calls) - 1, len(self._payloads) - 1)
-        return _FakeResponse(self._payloads[idx])
+        payload = self._payloads[idx]
+        if isinstance(payload, Exception):
+            raise payload
+        return _FakeResponse(payload)
 
     def stream(self, **kwargs: Any) -> _FakeStream:
         return _FakeStream(self._next(kwargs))
