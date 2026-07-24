@@ -9,6 +9,7 @@ running, but install the real tokenizer before trusting chunk sizes.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Protocol
 
@@ -38,13 +39,22 @@ class HeuristicTokenCounter:
 
 
 class HFTokenCounter:
-    """Exact counts via the embedder's own Hugging Face tokenizer."""
+    """Exact counts via the embedder's own Hugging Face tokenizer.
+
+    ``tokenizer_id`` is either a Hugging Face model id (downloads its
+    tokenizer.json) or a path to a local tokenizer.json -- the offline route
+    for environments where huggingface.co is unreachable (e.g. behind a
+    TLS-intercepting proxy the download stack doesn't trust).
+    """
 
     def __init__(self, tokenizer_id: str):
         from tokenizers import Tokenizer  # imported lazily
 
-        # ``from_pretrained`` pulls the tokenizer.json for the model id.
-        self._tok = Tokenizer.from_pretrained(tokenizer_id)
+        if os.path.isfile(tokenizer_id):
+            self._tok = Tokenizer.from_file(tokenizer_id)
+        else:
+            # ``from_pretrained`` pulls the tokenizer.json for the model id.
+            self._tok = Tokenizer.from_pretrained(tokenizer_id)
         # The GTE tokenizer ships with padding/truncation enabled to its max
         # length -- with those on, ``encode`` pads every input to 512 ids and
         # the count is meaningless. Disable both so we get the true length.

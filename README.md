@@ -77,6 +77,14 @@ intelligent-chunker export --chunks chunks.jsonl --profile profile.json \
 > tenant); all five checks passing means the pipeline runs unmodified. Cost
 > estimates are omitted for `databricks-*` model names (Databricks bills in
 > DBUs), so run summaries report tokens only.
+>
+> The GTE tokenizer is fetched from huggingface.co by the `tokenizers`
+> library's own HTTP stack, which `CHUNKER_CA_BUNDLE` does not cover — behind
+> a TLS-intercepting proxy that download fails and the pipeline falls back to
+> heuristic (approximate) token counting with a warning. For exact sizing,
+> download
+> [`tokenizer.json`](https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/main/tokenizer.json)
+> once and point `--tokenizer` (or `CHUNKER_TOKENIZER`) at the file.
 
 ### Fidelity report
 
