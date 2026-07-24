@@ -297,6 +297,15 @@ _INDEX_PAGE_MIN_HEADINGS = 3
 # previous section. The budget covers a running header line.
 _TOP_OF_PAGE_CHARS = 120
 
+# Word-fallback for headings whose extraction is scrambled: styled banners
+# ("SCHEDULE OF BENEFITS -- HSA Plan") can extract with fused or reordered
+# glyphs, which defeats contiguous matching while the words themselves remain
+# in the layer. Only words appearing on few pages document-wide count, so
+# ubiquitous vocabulary can't produce a false page.
+_TITLE_WORD_RE = re.compile(r"[a-z0-9]{3,}")
+_TITLE_RARE_MAX_DOC_PAGES = 4  # a word on <= this many pages is distinctive
+_TITLE_RARE_MIN_WORDS = 2  # need at least this many to trust the match
+
 
 def _heading_hit(norm_page: str, key: str) -> Optional[int]:
     """Offset of ``key`` as a heading in a normalized page, or None.
@@ -357,6 +366,32 @@ def ground_sections(
         content_hits = [h for h in sec_hits if h[0] not in index_pages]
         if len(content_hits) == 1:
             grounded[i] = content_hits[0]
+
+    # Word-fallback for the still-ungrounded: the unique non-index page
+    # holding every document-rare word of the title. Treated as opening its
+    # page (a scrambled banner gives no usable offset).
+    page_words = [set(_TITLE_WORD_RE.findall(t.lower())) for t in page_texts]
+    doc_freq: Dict[str, int] = {}
+    for ws in page_words:
+        for w in ws:
+            doc_freq[w] = doc_freq.get(w, 0) + 1
+    for i, sec in enumerate(sections):
+        if i in grounded or len(match_key(sec.title)) < _MATCH_MIN_KEY_CHARS:
+            continue
+        rare = {
+            w
+            for w in _TITLE_WORD_RE.findall(sec.title.lower())
+            if 0 < doc_freq.get(w, 0) <= _TITLE_RARE_MAX_DOC_PAGES
+        }
+        if len(rare) < _TITLE_RARE_MIN_WORDS:
+            continue
+        pages = [
+            p
+            for p, ws in enumerate(page_words, start=1)
+            if p not in index_pages and rare <= ws
+        ]
+        if len(pages) == 1:
+            grounded[i] = (pages[0], 0)
 
     for i, (page, _off) in grounded.items():
         sec = sections[i]
