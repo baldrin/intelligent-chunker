@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -124,9 +125,41 @@ class StructuredOutputError(RuntimeError):
     """
 
 
+def _tls_http_client() -> Optional[Any]:
+    """TLS trust for endpoints behind a private CA; None uses SDK defaults.
+
+    CHUNKER_CA_BUNDLE names a PEM bundle to verify against. Without it, the
+    OS certificate store is used when ``truststore`` is installed (corporate
+    machines usually have the private CA provisioned there).
+    """
+    import httpx
+
+    ca_bundle = os.environ.get("CHUNKER_CA_BUNDLE")
+    if ca_bundle:
+        logger.info("TLS: verifying against CA bundle %s", ca_bundle)
+        return httpx.Client(verify=ca_bundle)
+    try:
+        import ssl
+
+        import truststore
+    except ImportError:
+        return None
+    logger.info("TLS: using the OS trust store (truststore)")
+    return httpx.Client(verify=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+
+
 def make_client() -> "anthropic.Anthropic":
-    """Create a client. Reads ANTHROPIC_API_KEY (or an `ant` profile) from env."""
-    return anthropic.Anthropic()
+    """Create a client from the SDK's standard environment variables.
+
+    Direct API: ANTHROPIC_API_KEY. Gateway routing (e.g. a Databricks
+    workspace's ``/serving-endpoints/anthropic``): ANTHROPIC_BASE_URL plus
+    ANTHROPIC_AUTH_TOKEN, sent as a Bearer token. CHUNKER_CA_BUNDLE or an
+    installed ``truststore`` supply trust for private-CA endpoints.
+    """
+    http_client = _tls_http_client()
+    if http_client is None:
+        return anthropic.Anthropic()
+    return anthropic.Anthropic(http_client=http_client)
 
 
 def structured_call(
