@@ -32,7 +32,9 @@ _PASS2_RULES = (
     "sub-headings, list items; (3) each chunk should stand on its own; (4) "
     "preserve wording faithfully -- do not summarize or invent text; (5) for "
     "every chunk, set page_start/page_end to the physical page(s) its text "
-    "appears on, counting the FIRST page you were given as page 1; (6) never "
+    "appears on, counting the FIRST page you were given as page 1 -- IGNORE "
+    "page numbers printed in headers, footers, or the text itself, which "
+    "often differ from physical position; (6) never "
     "emit the same text twice -- each passage belongs in exactly one chunk, "
     "and when the text cross-references another subsection, keep the "
     "reference as written instead of copying the referenced text in. Use the "
@@ -176,6 +178,12 @@ _CHUNK_MATCH_CHARS = 40
 # locate reliably (stray headings, table fragments).
 _CHUNK_MATCH_MIN_CHARS = 15
 
+# When an edge finds nothing inside the section's pages, retry this many
+# pages beyond each end. Models drift page labels (printed page numbers often
+# differ from physical position by a cover page or two), and drifted text sits
+# just outside the claimed range, where the in-range search can't see it.
+_GROUND_MARGIN_PAGES = 2
+
 
 def ground_chunk_pages(
     pieces: List[Dict[str, Any]],
@@ -188,23 +196,37 @@ def ground_chunk_pages(
     A piece's first/last ``_CHUNK_MATCH_CHARS`` normalized characters are
     searched across the section's pages (``norm_pages`` is the full
     document's normalized text layer, ``match_key``-style). An edge found on
-    exactly one page pins that end of the range; zero or multiple hits keep
-    the model's value. Contradictory hits (start after end) distrust both.
-    Pieces are mutated in place and returned.
+    exactly one page pins that end of the range; multiple hits keep the
+    model's value. Zero hits retry with ``_GROUND_MARGIN_PAGES`` extra pages
+    on each end, so text whose label drifted out of the section can still be
+    located; the narrow pass stays first because the section range is also
+    what disambiguates text repeated elsewhere in the document.
+    Contradictory hits (start after end) distrust both. Pieces are mutated
+    in place and returned.
     """
     lo = max(1, sec_start)
     hi = min(sec_end, len(norm_pages))
-    pages = range(lo, hi + 1)
+    wide_lo = max(1, sec_start - _GROUND_MARGIN_PAGES)
+    wide_hi = min(sec_end + _GROUND_MARGIN_PAGES, len(norm_pages))
+
+    def locate(needle: str) -> Optional[int]:
+        hits = [p for p in range(lo, hi + 1) if needle in norm_pages[p - 1]]
+        if not hits:
+            hits = [
+                p
+                for p in range(wide_lo, wide_hi + 1)
+                if needle in norm_pages[p - 1]
+            ]
+        return hits[0] if len(hits) == 1 else None
+
     for pc in pieces:
         key = match_key(pc.get("text") or "")
         if len(key) < _CHUNK_MATCH_MIN_CHARS:
             continue
         prefix = key[:_CHUNK_MATCH_CHARS]
         suffix = key[-_CHUNK_MATCH_CHARS:]
-        ps_hits = [p for p in pages if prefix in norm_pages[p - 1]]
-        pe_hits = [p for p in pages if suffix in norm_pages[p - 1]]
-        ps = ps_hits[0] if len(ps_hits) == 1 else None
-        pe = pe_hits[0] if len(pe_hits) == 1 else None
+        ps = locate(prefix)
+        pe = locate(suffix)
         if ps is not None and pe is not None and ps > pe:
             continue  # both matched but out of order: trust neither
         old = (pc.get("page_start"), pc.get("page_end"))
