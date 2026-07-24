@@ -205,8 +205,9 @@ def structured_call(
                 raise
             transient_left -= 1
             logger.warning(
-                "Transient API error (%s); retrying in %.0fs",
+                "Transient API error (%s: %s); retrying in %.0fs",
                 type(exc).__name__,
+                exc,
                 delay,
             )
             time.sleep(delay)
