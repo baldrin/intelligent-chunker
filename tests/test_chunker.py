@@ -522,3 +522,62 @@ def test_ground_chunk_pages_widened_retry_still_requires_uniqueness():
     pieces = [{"text": _P2, "page_start": 2, "page_end": 2}]
     out = chunker.ground_chunk_pages(pieces, norm, 2, 2)
     assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
+
+
+# --- word-overlap grounding fallback -----------------------------------------
+
+_SENTENCE = (
+    "(ii) Orthopedic shoes or custom-molded foot orthotics are covered "
+    "when prescribed to prevent complications associated with diabetes"
+)
+# The text layer holds the same words SCRAMBLED (hanging-indent extraction),
+# so contiguous substring matching cannot find them.
+_SCRAMBLED = (
+    "orthotics diabetes prescribed molded custom orthopedic "
+    "shoes complications covered foot"
+)
+_FALLBACK_RAW = [
+    "welcome cover page filler content here",
+    "claimed page holds unrelated eligibility words",
+    "middle page other unrelated material words",
+    _SCRAMBLED,
+    "trailing page content words again",
+]
+_FALLBACK_NORM = [match_key(t) for t in _FALLBACK_RAW]
+
+
+def test_word_fallback_locates_scrambled_extraction():
+    # Field case: printed page numbers put the chunk 2 pages early, and the
+    # layer's word order is scrambled so substring grounding finds nothing.
+    pieces = [{"text": _SENTENCE, "page_start": 2, "page_end": 2}]
+    out = chunker.ground_chunk_pages(
+        pieces, _FALLBACK_NORM, 1, 2, raw_pages=_FALLBACK_RAW
+    )
+    assert (out[0]["page_start"], out[0]["page_end"]) == (4, 4)
+
+
+def test_word_fallback_requires_raw_pages():
+    pieces = [{"text": _SENTENCE, "page_start": 2, "page_end": 2}]
+    out = chunker.ground_chunk_pages(pieces, _FALLBACK_NORM, 1, 2)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
+
+
+def test_word_fallback_spans_adjacent_pages():
+    raw = list(_FALLBACK_RAW)
+    raw[3] = "orthotics diabetes prescribed molded custom orthopedic"
+    raw[4] = "shoes complications covered foot orthopedic extras"
+    norm = [match_key(t) for t in raw]
+    pieces = [{"text": _SENTENCE, "page_start": 2, "page_end": 2}]
+    out = chunker.ground_chunk_pages(pieces, norm, 1, 2, raw_pages=raw)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (4, 5)
+
+
+def test_word_fallback_ignores_generic_text():
+    # A piece with no distinctive vocabulary must not be relocated on the
+    # strength of boilerplate words alone.
+    generic = "the plan will provide coverage for services under this plan"
+    raw = ["plan coverage services provide under this the will for words"] * 5
+    norm = [match_key(t) for t in raw]
+    pieces = [{"text": generic, "page_start": 2, "page_end": 2}]
+    out = chunker.ground_chunk_pages(pieces, norm, 1, 2, raw_pages=raw)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
