@@ -154,9 +154,11 @@ def main() -> int:
             s.get_final_message()
 
     def structured():
+        # Roomy max_tokens: a truncated answer is an unterminated JSON string,
+        # which would fail the check for the wrong reason.
         with client.messages.stream(
             model=args.model,
-            max_tokens=64,
+            max_tokens=256,
             messages=[{"role": "user", "content": 'Answer: what color is the sky?'}],
             output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
         ) as s:

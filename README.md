@@ -66,6 +66,18 @@ intelligent-chunker export --chunks chunks.jsonl --profile profile.json \
 > API and Azure AI Foundry (32 MB/request); drop it to ~3 if calls route
 > through Databricks model serving (~4 MB/request).
 
+> **Databricks routing:** the pipeline can call Claude through a Databricks
+> workspace's native Anthropic endpoint instead of the direct API. Set
+> `ANTHROPIC_BASE_URL=https://<workspace-host>/serving-endpoints/anthropic`
+> and `ANTHROPIC_AUTH_TOKEN=<token>` (see `.env.example`), use
+> `databricks-claude-*` model names via `--pass1-model`/`--pass2-model`, and
+> pass `--max-request-mb 3`. For endpoints behind a private/corporate CA, set
+> `CHUNKER_CA_BUNDLE=/path/to/ca.pem` or `pip install truststore`. Verify an
+> endpoint end-to-end with `databricks_smoke_test.py` (run inside the
+> tenant); all five checks passing means the pipeline runs unmodified. Cost
+> estimates are omitted for `databricks-*` model names (Databricks bills in
+> DBUs), so run summaries report tokens only.
+
 ### Fidelity report
 
 After chunking, the pipeline compares each section's chunks against the PDF's
