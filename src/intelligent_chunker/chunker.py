@@ -489,11 +489,34 @@ def chunk_document(
     norm_pages = [match_key(t) for t in extract_page_texts(pdf_bytes)]
     has_text_layer = any(norm_pages)
 
+    # Shared across worker threads so one context overflow downgrades the
+    # whole run: page count alone can't predict token cost (PDF pages bill
+    # text + a per-page image), so a dense document can pass the 100-page
+    # cap yet overflow the context window. The API's rejection is the only
+    # reliable signal, and it would repeat on every full-document call.
+    state = {"full_doc_block": full_doc_block}
+
     def fetch(section: Section) -> List[Dict[str, Any]]:
         try:
+            block = state["full_doc_block"]
+            if block is not None:
+                try:
+                    return chunk_section(
+                        client, config, pdf_bytes, profile, section,
+                        full_doc_block=block, usage=usage,
+                    )
+                except Exception as exc:
+                    if "prompt is too long" not in str(exc):
+                        raise
+                    logger.warning(
+                        "Pass 2: the full document overflows the model's "
+                        "context window; falling back to per-section slices "
+                        "(prompt caching disabled)"
+                    )
+                    state["full_doc_block"] = None
             return chunk_section(
                 client, config, pdf_bytes, profile, section,
-                full_doc_block=full_doc_block, usage=usage,
+                full_doc_block=None, usage=usage,
             )
         except Exception as exc:
             raise RuntimeError(
