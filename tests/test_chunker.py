@@ -500,3 +500,25 @@ def test_non_overflow_errors_still_fail_the_section():
                 client, config, make_pdf(2), _two_section_profile(), COUNTER
             )
         )
+def test_ground_chunk_pages_finds_text_drifted_outside_the_section():
+    # Field case: the model labeled a chunk one page late (printed page
+    # numbers offset from physical position), so its text sits just before
+    # the section's claimed range. The in-range search finds nothing; the
+    # widened retry must locate and correct it.
+    norm = [
+        match_key(_P2),  # the chunk's text physically lives on page 1
+        match_key("the section's claimed pages hold different material"),
+        match_key("closing filler that matches nothing in the chunk"),
+    ]
+    pieces = [{"text": _P2, "page_start": 2, "page_end": 2}]
+    out = chunker.ground_chunk_pages(pieces, norm, 2, 3)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (1, 1)
+
+
+def test_ground_chunk_pages_widened_retry_still_requires_uniqueness():
+    # The same drifted text appears on both sides of the section: the wide
+    # pass sees two hits, so the model's value is kept rather than guessed.
+    norm = [match_key(_P2), match_key("mid filler"), match_key(_P2)]
+    pieces = [{"text": _P2, "page_start": 2, "page_end": 2}]
+    out = chunker.ground_chunk_pages(pieces, norm, 2, 2)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
