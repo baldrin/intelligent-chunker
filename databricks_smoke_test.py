@@ -15,7 +15,8 @@ stops:
     2. streaming              -- llm.py streams every request
     3. structured output      -- output_config json_schema (both passes)
     4. PDF document block     -- native PDF input (the whole pipeline)
-    5. prompt caching         -- cache_control on the document block (Pass 2)
+    5. prompt caching         -- cache_control on a prefix padded above the
+                                 minimum cacheable length (Pass 2 economics)
 
 Total cost is a fraction of a cent. Checks that depend on a failed check are
 skipped rather than reported as their own failures.
@@ -62,10 +63,10 @@ def tiny_pdf(path: str | None) -> bytes:
     return buf.getvalue()
 
 
-def doc_block(pdf_bytes: bytes, cached: bool = False) -> dict:
+def doc_block(pdf_bytes: bytes) -> dict:
     import base64
 
-    block = {
+    return {
         "type": "document",
         "source": {
             "type": "base64",
@@ -73,9 +74,6 @@ def doc_block(pdf_bytes: bytes, cached: bool = False) -> dict:
             "data": base64.standard_b64encode(pdf_bytes).decode("ascii"),
         },
     }
-    if cached:
-        block["cache_control"] = {"type": "ephemeral"}
-    return block
 
 
 def build_http_client(ca_bundle: str | None, insecure: bool):
@@ -178,24 +176,42 @@ def main() -> int:
         )
 
     def caching():
-        for _ in range(2):  # second call should be a cache read
+        # Pad the cached prefix well past every model's minimum cacheable
+        # length; below the minimum, cache_control is silently ignored and
+        # the check would fail for the wrong reason.
+        pad = {
+            "type": "text",
+            "text": "Neutral cache-padding sentence for the smoke test. " * 600,
+            "cache_control": {"type": "ephemeral"},
+        }
+        stats = []
+        for _ in range(2):  # call 1 writes the cache, call 2 should read it
             resp = client.messages.create(
                 model=args.model,
                 max_tokens=64,
                 messages=[
-                    {
-                        "role": "user",
-                        "content": [doc_block(pdf, cached=True), DESCRIBE],
-                    }
+                    {"role": "user", "content": [doc_block(pdf), pad, DESCRIBE]}
                 ],
             )
-        usage = getattr(resp, "usage", None)
-        read = getattr(usage, "cache_read_input_tokens", 0) or 0
-        if read <= 0:
-            raise RuntimeError(
-                "cache_control accepted but second call reported no "
-                f"cache_read_input_tokens (usage={usage!r})"
+            u = getattr(resp, "usage", None)
+            stats.append(
+                (
+                    getattr(u, "cache_creation_input_tokens", 0) or 0,
+                    getattr(u, "cache_read_input_tokens", 0) or 0,
+                )
             )
+        print(f"       cache (created, read): call1={stats[0]} call2={stats[1]}")
+        if stats[1][1] > 0:
+            return
+        if stats[0][0] <= 0:
+            raise RuntimeError(
+                f"cache never created {stats}: the endpoint likely strips "
+                "cache_control / caching unsupported"
+            )
+        raise RuntimeError(
+            f"cache written on call 1 but not read on call 2 {stats}: "
+            "cache not shared across requests (routing/TTL?)"
+        )
 
     if not run("1. plain text call", text_call):
         print("\nRouting/auth failed; nothing else can be tested.")
