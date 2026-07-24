@@ -19,6 +19,13 @@ stops:
 
 Total cost is a fraction of a cent. Checks that depend on a failed check are
 skipped rather than reported as their own failures.
+
+Private-tenant TLS: if the endpoint presents a certificate from a private CA
+(SSL: CERTIFICATE_VERIFY_FAILED), point verification at the corporate bundle
+with --ca-bundle /path/to/corp-ca.pem (or export SSL_CERT_FILE=...), or
+``pip install truststore`` to trust the OS certificate store, which corporate
+machines usually have provisioned. --insecure disables verification entirely
+and exists only to isolate TLS from other failures; never use it for real runs.
 """
 
 from __future__ import annotations
@@ -71,21 +78,53 @@ def doc_block(pdf_bytes: bytes, cached: bool = False) -> dict:
     return block
 
 
+def build_http_client(ca_bundle: str | None, insecure: bool):
+    """TLS setup for private tenants. None means use the SDK's default client."""
+    import httpx
+
+    if insecure:
+        print("[warn] TLS verification DISABLED -- diagnostic use only")
+        return httpx.Client(verify=False)
+    if ca_bundle:
+        print(f"[info] TLS: verifying against CA bundle {ca_bundle}")
+        return httpx.Client(verify=ca_bundle)
+    try:
+        import ssl
+
+        import truststore
+    except ImportError:
+        return None
+    print("[info] TLS: using the OS trust store (truststore)")
+    return httpx.Client(verify=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", default="databricks-claude-haiku-4-5")
     parser.add_argument("--host", default=os.environ.get("DATABRICKS_HOST"))
     parser.add_argument("--pdf", help="Optional real PDF; its first page is used.")
+    parser.add_argument(
+        "--ca-bundle",
+        default=os.environ.get("CHUNKER_CA_BUNDLE"),
+        help="PEM bundle for a private CA (also via CHUNKER_CA_BUNDLE).",
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS verification. Diagnostic use only.",
+    )
     args = parser.parse_args()
 
     token = os.environ.get("DATABRICKS_TOKEN")
     if not args.host or not token:
         sys.exit("Set DATABRICKS_HOST (or --host) and DATABRICKS_TOKEN.")
 
+    http_client = build_http_client(args.ca_bundle, args.insecure)
     client = anthropic.Anthropic(
         api_key="unused",
         base_url=args.host.rstrip("/") + "/serving-endpoints/anthropic",
         default_headers={"Authorization": f"Bearer {token}"},
+        **({"http_client": http_client} if http_client else {}),
     )
     pdf = tiny_pdf(args.pdf)
     results: dict[str, str] = {}
