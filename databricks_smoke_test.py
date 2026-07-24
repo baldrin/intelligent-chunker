@@ -5,7 +5,7 @@ Run from inside the tenant (or paste into a Databricks notebook). Requires the
 
     export DATABRICKS_HOST=https://adb-xxxx.azuredatabricks.net
     export DATABRICKS_TOKEN=<pat>
-    python databricks_smoke_test.py [--model databricks-claude-haiku-4-5] [--pdf some.pdf]
+    python databricks_smoke_test.py [--model databricks-claude-...] [--pdf some.pdf]
 
 Each check exercises one feature the chunker depends on, in order of
 increasing exoticness, so the first FAIL tells you where Databricks support
@@ -30,6 +30,8 @@ import os
 import sys
 
 import anthropic
+
+DESCRIBE = {"type": "text", "text": "Describe this document in one sentence."}
 
 SCHEMA = {
     "type": "object",
@@ -131,10 +133,7 @@ def main() -> int:
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        doc_block(pdf),
-                        {"type": "text", "text": "Describe this document in one sentence."},
-                    ],
+                    "content": [doc_block(pdf), DESCRIBE],
                 }
             ],
         )
@@ -147,10 +146,7 @@ def main() -> int:
                 messages=[
                     {
                         "role": "user",
-                        "content": [
-                            doc_block(pdf, cached=True),
-                            {"type": "text", "text": "Describe this document in one sentence."},
-                        ],
+                        "content": [doc_block(pdf, cached=True), DESCRIBE],
                     }
                 ],
             )
