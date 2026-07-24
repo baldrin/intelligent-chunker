@@ -136,6 +136,26 @@ def chunk_novelty_flags(
     unmapped = {
         s.title for s in profile.sections if s.section_type == "unmapped"
     }
+    # Per-page word sets for locating a novel line anywhere in the document,
+    # so each flag says WHICH failure it is instead of just "not on its pages".
+    page_word_sets = [set(_WORD_RE.findall(t.lower())) for t in page_texts]
+
+    def locate_line(words: List[str]) -> str:
+        hits = [
+            page
+            for page, ws in enumerate(page_word_sets, 1)
+            if sum(1 for w in words if w not in ws) / len(words)
+            < _NOVEL_LINE_ABSENT_FRACTION
+        ]
+        if hits:
+            shown = ", ".join(str(p) for p in hits[:3])
+            more = "+" if len(hits) > 3 else ""
+            return f"found on page {shown}{more} (misattributed pages)"
+        return (
+            "not in the text layer of any page (invented, or the text "
+            "layer is incomplete there)"
+        )
+
     flags: List[Dict[str, Any]] = []
     for chunk in chunks:
         if chunk.section_title in unmapped:
@@ -148,6 +168,7 @@ def chunk_novelty_flags(
         score = score_texts(reference, chunk.text)
         ref_words = set(_WORD_RE.findall(reference.lower()))
         novel_lines: List[str] = []
+        novel_line_hints: List[str] = []
         for line in chunk.text.splitlines():
             words = _WORD_RE.findall(line.lower())
             if len(words) < _NOVEL_LINE_MIN_WORDS:
@@ -155,6 +176,7 @@ def chunk_novelty_flags(
             absent = sum(1 for w in words if w not in ref_words)
             if absent / len(words) >= _NOVEL_LINE_ABSENT_FRACTION:
                 novel_lines.append(line.strip())
+                novel_line_hints.append(locate_line(words))
         if score["novelty"] <= NOVELTY_WARN_ABOVE and not novel_lines:
             continue
         flags.append(
@@ -165,6 +187,7 @@ def chunk_novelty_flags(
                 "page_end": chunk.page_end,
                 "novelty": score["novelty"],
                 "novel_lines": novel_lines[:_NOVEL_LINES_MAX],
+                "novel_line_hints": novel_line_hints[:_NOVEL_LINES_MAX],
             }
         )
         logger.warning(
@@ -175,7 +198,9 @@ def chunk_novelty_flags(
             chunk.page_end,
             chunk.section_title,
             score["novelty"],
-            "; e.g. %r" % novel_lines[0] if novel_lines else "",
+            "; e.g. %r [%s]" % (novel_lines[0], novel_line_hints[0])
+            if novel_lines
+            else "",
         )
     return flags
 
