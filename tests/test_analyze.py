@@ -336,3 +336,45 @@ def test_analyze_document_parallel_matches_sequential():
     assert par.page_count == 4
     assert len(par.sections) == 1
     assert par.sections[0].page_start == 1 and par.sections[0].page_end == 4
+
+
+def test_ground_sections_word_fallback_locates_scrambled_heading():
+    from intelligent_chunker.models import Section
+
+    # Field case: a styled schedule banner extracts scrambled/fused, so the
+    # contiguous heading never matches -- but its distinctive words are all on
+    # the one physical page. Pass 1 claimed printed numbers (two behind).
+    pages = [
+        "Introduction to the plan overview text",
+        "eligibility filler content for the middle",
+        "BENEFITS OF SCHEDULE hsa plan deductible rows here",
+        "continuation of the schedule table rows",
+        "closing filler page",
+        "more closing filler",
+    ]
+    sections = [
+        Section.from_dict(_section("Introduction", 1, 2)),
+        Section.from_dict(_section("Schedule of Benefits - HSA Plan", 5, 6)),
+    ]
+    out = analyze.ground_sections(sections, pages)
+    schedule = next(s for s in out if "HSA" in s.title)
+    assert schedule.page_start == 3  # snapped by the word fallback
+    intro = next(s for s in out if s.title == "Introduction")
+    assert intro.page_end == 2  # boundary derived: schedule opens page 3
+
+
+def test_ground_sections_word_fallback_needs_unique_and_rare_words():
+    from intelligent_chunker.models import Section
+
+    # Title words spread over many pages (nothing rare) or present on two
+    # candidate pages: both cases must leave the model's range untouched.
+    pages = ["plan benefits words"] * 5 + [
+        "special rider addendum text",
+        "special rider addendum text again",
+    ]
+    sections = [
+        Section.from_dict(_section("Plan Benefits", 2, 2)),  # nothing rare
+        Section.from_dict(_section("Special Rider Addendum", 1, 1)),  # 2 hits
+    ]
+    out = analyze.ground_sections(sections, pages)
+    assert [(s.page_start, s.page_end) for s in out] == [(1, 1), (2, 2)]
