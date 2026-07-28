@@ -8,13 +8,13 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .analyze import analyze_document
+from .analyze import analyze_document, uniquify_titles
 from .chunker import chunk_document
 from .config import ChunkerConfig
 from .fidelity import fidelity_report
 from .llm import UsageTracker, make_client
 from .models import Chunk, DocumentProfile
-from .pdf_io import read_pdf
+from .pdf_io import count_pages, read_pdf
 from .tokenizer import get_token_counter
 
 logger = logging.getLogger(__name__)
@@ -48,12 +48,46 @@ def completed_section_prefix(
 
 
 def _read_chunks(path: str) -> List[Chunk]:
+    """Read a chunks JSONL file written by an interrupted run, safely.
+
+    A run killed mid-write leaves a truncated final line, and -- because the
+    OS flushes on buffer boundaries, not section boundaries -- possibly some
+    complete lines of the section that was being written. Reading stops at
+    the first unparseable line, and every trailing chunk belonging to the
+    same section as the last good line is dropped too: that section cannot
+    be proven complete, so it re-chunks on resume (cheap) rather than
+    resuming with a silently missing tail (content loss).
+    """
     chunks: List[Chunk] = []
+    truncated = False
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        for lineno, line in enumerate(f, start=1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 chunks.append(Chunk.from_dict(json.loads(line)))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                logger.warning(
+                    "%s line %d is not a valid chunk record (interrupted "
+                    "write?); ignoring it and everything after",
+                    path,
+                    lineno,
+                )
+                truncated = True
+                break
+    if truncated and chunks:
+        torn_title = chunks[-1].section_title
+        dropped = 0
+        while chunks and chunks[-1].section_title == torn_title:
+            chunks.pop()
+            dropped += 1
+        logger.warning(
+            "Dropping %d chunk(s) of section %r: the file was cut off "
+            "mid-write, so that section may be incomplete and will re-chunk",
+            dropped,
+            torn_title,
+        )
     return chunks
 
 
@@ -87,6 +121,28 @@ def run(
     if resume and profile_path and os.path.exists(profile_path):
         with open(profile_path, "r", encoding="utf-8") as f:
             profile = DocumentProfile.from_dict(json.load(f))
+        # A profile for a different PDF corrupts everything downstream (page
+        # clamps, slicing, grounding), so mismatches are a hard error; a
+        # differing filename alone may just be a rename, so it only warns.
+        actual_pages = count_pages(pdf_bytes)
+        if profile.page_count != actual_pages:
+            raise ValueError(
+                f"Resume: {profile_path} says {profile.page_count} pages but "
+                f"{source_file} has {actual_pages} -- the profile does not "
+                "match this PDF. Delete it or re-run without --resume."
+            )
+        if profile.source_file and profile.source_file != source_file:
+            logger.warning(
+                "Resume: profile was written for %r but chunking %r; "
+                "continuing since the page counts match",
+                profile.source_file,
+                source_file,
+            )
+        # Profiles written before titles were uniquified can carry duplicate
+        # titles, which corrupt the resume prefix; normalize and persist so
+        # disk titles match the chunks this run writes.
+        uniquify_titles(profile.sections)
+        write_profile(profile, profile_path)
         logger.info(
             "Resume: loaded profile from %s (%d sections); skipping Pass 1",
             profile_path,
@@ -168,14 +224,14 @@ def run(
             )
         else:
             logger.info("Fidelity: %s", report["reason"])
-        if profile_path:
-            with open(profile_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {**profile.to_dict(), "fidelity": report},
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+    if profile_path:
+        # Rewritten even when fidelity is skipped, so a stale block from an
+        # earlier run never describes chunks that no longer exist.
+        payload = profile.to_dict()
+        if report is not None:
+            payload["fidelity"] = report
+        with open(profile_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
     logger.info("Usage: %s", usage.summary())
 
