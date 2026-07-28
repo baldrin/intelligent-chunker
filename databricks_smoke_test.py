@@ -163,7 +163,14 @@ def main() -> int:
             output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
         ) as s:
             msg = s.get_final_message()
-        json.loads(msg.content[0].text)  # must be conforming JSON
+        # The first text block holds the JSON (other block types may precede).
+        text = next(
+            (b.text for b in msg.content if getattr(b, "type", None) == "text"),
+            None,
+        )
+        if text is None:
+            raise RuntimeError("no text block in structured-output response")
+        json.loads(text)  # must be conforming JSON
 
     def pdf_block():
         client.messages.create(

@@ -66,6 +66,20 @@ class _FakeStream:
         return self._response
 
 
+class TruncatedPayload:
+    """Wrap a canned payload so the response reports stop_reason='max_tokens'."""
+
+    def __init__(self, payload: Dict[str, Any]):
+        self.payload = payload
+
+
+class RawTextPayload:
+    """Wrap literal (possibly non-JSON) text as the response's text block."""
+
+    def __init__(self, text: str):
+        self.text = text
+
+
 class _FakeMessages:
     def __init__(self, payloads: List[Dict[str, Any]]):
         self._payloads = payloads
@@ -79,6 +93,14 @@ class _FakeMessages:
         payload = self._payloads[idx]
         if isinstance(payload, Exception):
             raise payload
+        if isinstance(payload, TruncatedPayload):
+            response = _FakeResponse(payload.payload)
+            response.stop_reason = "max_tokens"
+            return response
+        if isinstance(payload, RawTextPayload):
+            response = _FakeResponse({})
+            response.content = [_FakeBlock(payload.text)]
+            return response
         return _FakeResponse(payload)
 
     def stream(self, **kwargs: Any) -> _FakeStream:

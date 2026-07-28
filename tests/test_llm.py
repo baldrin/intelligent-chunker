@@ -40,3 +40,39 @@ def test_make_client_defaults_without_tls_override(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     client = llm.make_client()
     assert isinstance(client._client, httpx.Client)
+
+
+def test_truncation_raises_without_repair_attempt():
+    import pytest
+    from conftest import FakeClient, TruncatedPayload
+
+    client = FakeClient([TruncatedPayload({"chunks": []})])
+    with pytest.raises(llm.TruncatedOutputError):
+        llm.structured_call(
+            client,
+            model="m",
+            system="s",
+            content=[],
+            schema={},
+            max_tokens=10,
+            repair_attempts=3,
+        )
+    # An identical retry would truncate identically: exactly one call made.
+    assert len(client.messages.calls) == 1
+
+
+def test_unparseable_json_still_uses_repair():
+    from conftest import FakeClient, RawTextPayload
+
+    client = FakeClient([RawTextPayload("not json {"), {"ok": True}])
+    out = llm.structured_call(
+        client,
+        model="m",
+        system="s",
+        content=[],
+        schema={},
+        max_tokens=10,
+        repair_attempts=1,
+    )
+    assert out == {"ok": True}
+    assert len(client.messages.calls) == 2

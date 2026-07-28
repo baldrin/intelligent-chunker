@@ -118,9 +118,18 @@ def load_parquet_to_delta(parquet_path: str, table_name: str, key: str = "id") -
     print(f"loaded {table_name}: {spark.table(table_name).count()} rows")
 
 
+import os
+
+# `intelligent-chunker export --no-glossary` writes no glossary.parquet; skip
+# the glossary table/index everywhere below in that case.
+HAS_GLOSSARY = os.path.exists(f"{INPUT}/glossary.parquet")
+
 load_parquet_to_delta(f"{INPUT}/chunks.parquet", CHUNKS_TABLE)
 load_parquet_to_delta(f"{INPUT}/documents.parquet", DOCS_TABLE, key="doc_id")
-load_parquet_to_delta(f"{INPUT}/glossary.parquet", GLOSSARY_TABLE)
+if HAS_GLOSSARY:
+    load_parquet_to_delta(f"{INPUT}/glossary.parquet", GLOSSARY_TABLE)
+else:
+    print("glossary.parquet not found (export --no-glossary?); skipping glossary")
 
 # COMMAND ----------
 
@@ -230,7 +239,8 @@ def add_embeddings(table_name: str) -> None:
 
 
 add_embeddings(CHUNKS_TABLE)
-add_embeddings(GLOSSARY_TABLE)   # so "what does X mean" queries hit definitions
+if HAS_GLOSSARY:
+    add_embeddings(GLOSSARY_TABLE)  # "what does X mean" queries hit definitions
 display(spark.table(CHUNKS_TABLE).select("id", "section_title", "embedding").limit(3))
 
 # COMMAND ----------
@@ -272,10 +282,10 @@ def create_self_managed_index(source_table: str, index_name: str) -> None:
 
 
 create_self_managed_index(CHUNKS_TABLE, CHUNKS_INDEX)
-create_self_managed_index(GLOSSARY_TABLE, GLOSSARY_INDEX)
-
 vsc.get_index(VS_ENDPOINT, CHUNKS_INDEX).wait_until_ready(verbose=True)
-vsc.get_index(VS_ENDPOINT, GLOSSARY_INDEX).wait_until_ready(verbose=True)
+if HAS_GLOSSARY:
+    create_self_managed_index(GLOSSARY_TABLE, GLOSSARY_INDEX)
+    vsc.get_index(VS_ENDPOINT, GLOSSARY_INDEX).wait_until_ready(verbose=True)
 
 # COMMAND ----------
 

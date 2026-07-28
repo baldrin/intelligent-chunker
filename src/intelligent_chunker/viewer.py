@@ -8,16 +8,34 @@ the DOM (textContent), so document content can't break the page or inject HTML.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 def load_chunks(path: str) -> List[Dict[str, Any]]:
+    """Load chunk records, stopping (with a warning) at a truncated line.
+
+    An interrupted run can leave a cut-off final line; the complete records
+    before it are still worth viewing.
+    """
     chunks: List[Dict[str, Any]] = []
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        for lineno, line in enumerate(f, start=1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 chunks.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.warning(
+                    "%s line %d is not valid JSON (interrupted write?); "
+                    "ignoring it and everything after",
+                    path,
+                    lineno,
+                )
+                break
     return chunks
 
 

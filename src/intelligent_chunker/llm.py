@@ -77,8 +77,11 @@ class UsageTracker:
             return out
 
     def estimated_cost_usd(self) -> Optional[float]:
-        """Dollar estimate, or None when any used model has unknown pricing."""
+        """Dollar estimate, or None when nothing was recorded or any used
+        model has unknown pricing."""
         with self._lock:
+            if not self.by_model:
+                return None
             total = 0.0
             for model, c in self.by_model.items():
                 rates = _pricing_for(model)
@@ -120,8 +123,17 @@ _RETRYABLE = (
 class StructuredOutputError(RuntimeError):
     """The response arrived but its structured output was unusable.
 
-    Truncation, a missing text block, or JSON that fails to parse. Unlike a
-    refusal, re-issuing the request is a reasonable repair.
+    A missing text block, or JSON that fails to parse. Unlike a refusal,
+    re-issuing the request is a reasonable repair.
+    """
+
+
+class TruncatedOutputError(StructuredOutputError):
+    """Structured output hit ``max_tokens``.
+
+    Re-issuing the identical request would truncate identically, so this is
+    never repaired -- the fix is a config change (raise max_output_tokens or
+    shrink the batch), which the error message spells out.
     """
 
 
@@ -212,6 +224,10 @@ def structured_call(
             )
             time.sleep(delay)
             delay *= 2
+        except TruncatedOutputError:
+            # An identical retry truncates identically; don't burn a repair
+            # attempt (or its cost) on it.
+            raise
         except StructuredOutputError as exc:
             if repair_left <= 0:
                 raise
@@ -254,7 +270,7 @@ def _structured_call_once(
             )
         )
     if response.stop_reason == "max_tokens":
-        raise StructuredOutputError(
+        raise TruncatedOutputError(
             f"Structured output was truncated at max_tokens={max_tokens}. "
             "Increase ChunkerConfig.max_output_tokens, or lower "
             "max_pages_per_batch so each request produces less output."

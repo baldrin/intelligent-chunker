@@ -209,6 +209,8 @@ def _locate_by_words(
     hi: int,
 ) -> Optional[tuple]:
     """Locate ``text`` in pages [lo, hi] by its distinctive words, or None."""
+    if hi < lo:  # empty window (e.g. section pages beyond the text layer)
+        return None
     rare = {
         w
         for w in _WORDISH_RE.findall(text.lower())
@@ -244,12 +246,28 @@ def _locate_by_words(
     return start, end
 
 
+def build_page_words(raw_pages: List[str]) -> tuple:
+    """Per-page word sets and document-wide page frequency for those words.
+
+    Computed once per document by ``chunk_document`` and shared across every
+    section's ``ground_chunk_pages`` call (the inputs never change mid-run).
+    """
+    page_words = [set(_WORDISH_RE.findall(t.lower())) for t in raw_pages]
+    doc_freq: Dict[str, int] = {}
+    for ws in page_words:
+        for w in ws:
+            doc_freq[w] = doc_freq.get(w, 0) + 1
+    return page_words, doc_freq
+
+
 def ground_chunk_pages(
     pieces: List[Dict[str, Any]],
     norm_pages: List[str],
     sec_start: int,
     sec_end: int,
     raw_pages: Optional[List[str]] = None,
+    page_words: Optional[List[set]] = None,
+    doc_freq: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Snap each piece's page range to where its text appears in the section.
 
@@ -265,7 +283,9 @@ def ground_chunk_pages(
     When ``raw_pages`` (the unnormalized text layer) is given and neither
     edge matched at all, a word-overlap fallback locates the piece by its
     distinctive words -- immune to the extraction word-scrambling (hanging
-    indents, tables) that defeats substring matching.
+    indents, tables) that defeats substring matching. Callers processing
+    many sections should pass the ``build_page_words`` results via
+    ``page_words``/``doc_freq`` instead of recomputing them per call.
 
     Contradictory hits (start after end) distrust both. Pieces are mutated
     in place and returned.
@@ -275,13 +295,9 @@ def ground_chunk_pages(
     wide_lo = max(1, sec_start - _GROUND_MARGIN_PAGES)
     wide_hi = min(sec_end + _GROUND_MARGIN_PAGES, len(norm_pages))
 
-    page_words: Optional[List[set]] = None
-    doc_freq: Dict[str, int] = {}
-    if raw_pages is not None:
-        page_words = [set(_WORDISH_RE.findall(t.lower())) for t in raw_pages]
-        for ws in page_words:
-            for w in ws:
-                doc_freq[w] = doc_freq.get(w, 0) + 1
+    if page_words is None and raw_pages is not None:
+        page_words, doc_freq = build_page_words(raw_pages)
+    doc_freq = doc_freq or {}
 
     def locate(needle: str) -> Optional[int]:
         hits = [p for p in range(lo, hi + 1) if needle in norm_pages[p - 1]]
@@ -587,10 +603,16 @@ def chunk_document(
     sections = list(profile.sections) if sections is None else list(sections)
 
     # Normalized text layer for per-chunk page grounding (empty for scanned
-    # PDFs, in which case the model's self-reported pages stand).
+    # PDFs, in which case the model's self-reported pages stand). The word
+    # sets and frequencies are document-wide, so compute them once here
+    # instead of once per section.
     raw_pages = extract_page_texts(pdf_bytes)
     norm_pages = [match_key(t) for t in raw_pages]
     has_text_layer = any(norm_pages)
+    page_words: Optional[List[set]] = None
+    doc_freq: Optional[Dict[str, int]] = None
+    if has_text_layer:
+        page_words, doc_freq = build_page_words(raw_pages)
 
     # Shared across worker threads so one context overflow downgrades the
     # whole run: page count alone can't predict token cost (PDF pages bill
@@ -686,12 +708,17 @@ def chunk_document(
         #    packed pages against where the text physically appears.
         packed = pack_chunks(pieces, pack_target, counter)
         if has_text_layer:
+            # Same clamping as chunk_section, so grounding and the model see
+            # one section range.
+            sec_start = max(1, min(section.page_start, profile.page_count))
+            sec_end = max(sec_start, min(section.page_end, profile.page_count))
             packed = ground_chunk_pages(
                 packed,
                 norm_pages,
-                max(1, min(section.page_start, profile.page_count)),
-                max(section.page_start, min(section.page_end, profile.page_count)),
-                raw_pages=raw_pages,
+                sec_start,
+                sec_end,
+                page_words=page_words,
+                doc_freq=doc_freq,
             )
         section_chunks: List[Chunk] = []
         for pc in packed:

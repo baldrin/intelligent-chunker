@@ -253,12 +253,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             pdf_bytes = read_pdf(args.pdf)
             with open(args.profile, "r", encoding="utf-8") as f:
                 profile_dict = json.load(f)
+            chunks = []
             with open(args.chunks, "r", encoding="utf-8") as f:
-                chunks = [
-                    Chunk.from_dict(json.loads(line))
-                    for line in f
-                    if line.strip()
-                ]
+                for lineno, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        chunks.append(Chunk.from_dict(json.loads(line)))
+                    except (json.JSONDecodeError, KeyError):
+                        # Interrupted write: score the complete records.
+                        print(
+                            f"Warning: {args.chunks} line {lineno} is not a "
+                            "valid chunk record; ignoring it and everything "
+                            "after.",
+                            file=sys.stderr,
+                        )
+                        break
         except FileNotFoundError as exc:
             print(
                 f"Input not found: {exc.filename or exc}. "

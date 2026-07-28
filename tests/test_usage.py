@@ -67,3 +67,9 @@ def test_chunk_document_records_usage():
     )
     assert tracker.calls == 2
     assert tracker.totals()["input_tokens"] == 200
+
+
+def test_empty_tracker_cost_is_none():
+    tracker = UsageTracker()
+    assert tracker.estimated_cost_usd() is None
+    assert "$" not in tracker.summary()

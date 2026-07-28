@@ -581,3 +581,43 @@ def test_word_fallback_ignores_generic_text():
     pieces = [{"text": generic, "page_start": 2, "page_end": 2}]
     out = chunker.ground_chunk_pages(pieces, norm, 1, 2, raw_pages=raw)
     assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
+
+
+def test_locate_by_words_empty_window_returns_none():
+    # A section claiming pages beyond the text layer yields an empty search
+    # window; this must be a no-match, not a crash.
+    text = "distinctive vesting forfeiture allocation beneficiary rollover"
+    assert chunker._locate_by_words(text, [], {}, 5, 4) is None
+
+
+def test_ground_chunk_pages_section_beyond_text_layer_is_noop():
+    # Stale/mismatched profile: the section's range sits entirely past the
+    # last text-layer page. Grounding must leave the piece untouched.
+    raw = ["vesting schedule percentage forfeiture allocation beneficiary"]
+    norm = [match_key(raw[0])]
+    pieces = [
+        {
+            "text": "zzz vesting schedule percentage forfeiture allocation "
+            "beneficiary qqq",
+            "page_start": 20,
+            "page_end": 20,
+        }
+    ]
+    out = chunker.ground_chunk_pages(pieces, norm, 20, 20, raw_pages=raw)
+    assert (out[0]["page_start"], out[0]["page_end"]) == (20, 20)
+
+
+def test_ground_chunk_pages_accepts_precomputed_word_maps():
+    # chunk_document precomputes the word maps once per run; results must
+    # match the per-call computation from raw_pages.
+    pieces = [{"text": _SENTENCE, "page_start": 2, "page_end": 2}]
+    page_words, doc_freq = chunker.build_page_words(_FALLBACK_RAW)
+    out = chunker.ground_chunk_pages(
+        [dict(p) for p in pieces],
+        _FALLBACK_NORM,
+        1,
+        2,
+        page_words=page_words,
+        doc_freq=doc_freq,
+    )
+    assert (out[0]["page_start"], out[0]["page_end"]) == (4, 4)
