@@ -378,3 +378,117 @@ def test_ground_sections_word_fallback_needs_unique_and_rare_words():
     ]
     out = analyze.ground_sections(sections, pages)
     assert [(s.page_start, s.page_end) for s in out] == [(1, 1), (2, 2)]
+
+
+# --- batch-provenance folding and title uniquification -----------------------
+
+
+def test_merge_sections_keeps_touching_same_title_within_batch():
+    # One batch listed two same-titled sections back to back (e.g. per-plan
+    # "Claims Procedures" chapters): distinct sections, must not fold.
+    raw = [
+        {**_section("Claims Procedures", 4, 5, summary="medical"), "_batch": 0},
+        {**_section("Claims Procedures", 6, 7, summary="dental"), "_batch": 0},
+    ]
+    merged = analyze._merge_sections(raw)
+    assert [(s.page_start, s.page_end) for s in merged] == [(4, 5), (6, 7)]
+    assert [s.summary for s in merged] == ["medical", "dental"]
+
+
+def test_merge_sections_folds_touching_across_batches():
+    # The same section straddling a batch boundary can be reported with
+    # touching (not overlapping) ranges; across batches it still folds.
+    raw = [
+        {**_section("Eligibility", 1, 2), "_batch": 0},
+        {**_section("Eligibility", 3, 4), "_batch": 1},
+    ]
+    merged = analyze._merge_sections(raw)
+    assert len(merged) == 1
+    assert merged[0].page_start == 1 and merged[0].page_end == 4
+
+
+def test_merge_sections_untagged_touch_keeps_folding():
+    # Direct callers without provenance keep the older fold-on-touch rule.
+    raw = [_section("S", 1, 2), _section("S", 3, 4)]
+    assert len(analyze._merge_sections(raw)) == 1
+
+
+def test_merge_sections_same_batch_overlap_still_folds():
+    # A model re-listing one section with overlapping ranges inside a single
+    # batch is a duplicate, not two sections.
+    raw = [
+        {**_section("Vesting", 3, 6), "_batch": 0},
+        {**_section("Vesting", 5, 8), "_batch": 0},
+    ]
+    merged = analyze._merge_sections(raw)
+    assert len(merged) == 1
+    assert merged[0].page_start == 3 and merged[0].page_end == 8
+
+
+def test_reconcile_uniquifies_duplicate_titles():
+    # Two distinct sections sharing a title (non-adjacent, so they survive
+    # merging) must come out of reconcile with unique titles -- resume,
+    # fidelity, and the viewer all key on the title.
+    sections = [
+        _section("Definitions", 1, 2),
+        _section("Benefits", 3, 4),
+        _section("Definitions", 5, 6),
+    ]
+    out = _reconcile_titles(sections, page_count=6)
+    assert [s.title for s in out] == [
+        "Definitions",
+        "Benefits",
+        "Definitions (2)",
+    ]
+
+
+def test_reconcile_uniquify_avoids_existing_title_collision():
+    sections = [
+        _section("Schedule", 1, 1),
+        _section("Schedule (2)", 3, 3),
+        _section("Schedule", 5, 5),
+    ]
+    out = _reconcile_titles(sections, page_count=5)
+    titles = [s.title for s in out if s.section_type != "unmapped"]
+    assert titles == ["Schedule", "Schedule (2)", "Schedule (3)"]
+
+
+def test_reconcile_uniquifies_after_grounding():
+    # A heading that appears twice in the text layer is ambiguous, so
+    # grounding leaves both sections' ranges alone -- and the suffix is only
+    # added afterwards, so it never corrupts heading matching.
+    pages = [
+        "GENERAL DEFINITIONS medical plan words",
+        "benefits filler content",
+        "GENERAL DEFINITIONS dental plan words",
+    ]
+    partials = [
+        {
+            "doc_type": "SPD",
+            "title": "T",
+            "plan_name": "",
+            "sponsor": "",
+            "effective_dates": [],
+            "sections": [
+                _section("General Definitions", 1, 1),
+                _section("Benefits", 2, 2),
+                _section("General Definitions", 3, 3),
+            ],
+            "glossary": [],
+            "cross_references": [],
+            "notes": "",
+        }
+    ]
+    profile = analyze.reconcile(
+        partials, source_file="x.pdf", page_count=3, page_texts=pages
+    )
+    assert [s.title for s in profile.sections] == [
+        "General Definitions",
+        "Benefits",
+        "General Definitions (2)",
+    ]
+    assert [(s.page_start, s.page_end) for s in profile.sections] == [
+        (1, 1),
+        (2, 2),
+        (3, 3),
+    ]

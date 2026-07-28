@@ -226,34 +226,54 @@ def _merge_sections(raw_sections: List[Dict[str, Any]]) -> List[Section]:
     """Fold duplicates created by batch overlap, then order by page.
 
     Two sections fold together when their normalized titles match and their
-    page ranges overlap or touch -- the case where the same heading is seen in
-    two overlapping batches. The folded section spans the union of the ranges.
-    Grouping by title (rather than only comparing page-adjacent neighbors)
-    means a duplicate still folds even when a different section sorts between
-    its two sightings.
+    page ranges overlap -- the case where the same heading is seen in two
+    overlapping batches. Ranges that merely *touch* fold only when the two
+    sightings come from different Pass 1 batches (``_batch`` on the raw
+    dicts, tagged by ``reconcile``): a section straddling a batch boundary
+    can be reported with touching rather than overlapping ranges, but two
+    same-titled touching sections listed by ONE batch are distinct sections
+    (e.g. per-plan "Claims Procedures" chapters) and must stay separate.
+    Untagged sections keep the older fold-on-touch behavior. Residual risk,
+    accepted: two genuinely distinct same-titled sections that touch exactly
+    at a batch boundary still fold (mis-attribution, never content loss).
+
+    The folded section spans the union of the ranges. Grouping by title
+    (rather than only comparing page-adjacent neighbors) means a duplicate
+    still folds even when a different section sorts between its two
+    sightings.
     """
-    sections = [Section.from_dict(s) for s in raw_sections]
-    sections.sort(key=lambda s: (s.page_start, s.page_end))
+    tagged = [(Section.from_dict(s), s.get("_batch")) for s in raw_sections]
+    tagged.sort(key=lambda t: (t[0].page_start, t[0].page_end))
 
     merged: List[Section] = []
-    by_title: Dict[str, List[Section]] = {}
-    for sec in sections:
+    # title key -> [(section, batches that contributed to it)]
+    by_title: Dict[str, List[Tuple[Section, set]]] = {}
+    for sec, batch in tagged:
         key = _normalize_title(sec.title)
         folded = False
-        for prev in by_title.get(key, []):
+        for prev, batches in by_title.get(key, []):
             overlaps = (
+                sec.page_start <= prev.page_end
+                and prev.page_start <= sec.page_end
+            )
+            touches = (
                 sec.page_start <= prev.page_end + 1
                 and prev.page_start <= sec.page_end + 1
             )
-            if overlaps:
+            cross_batch = batch is None or batch not in batches
+            if overlaps or (touches and cross_batch):
                 prev.page_start = min(prev.page_start, sec.page_start)
                 prev.page_end = max(prev.page_end, sec.page_end)
                 if len(sec.summary) > len(prev.summary):
                     prev.summary = sec.summary
+                if batch is not None:
+                    batches.add(batch)
                 folded = True
                 break
         if not folded:
-            by_title.setdefault(key, []).append(sec)
+            by_title.setdefault(key, []).append(
+                (sec, {batch} if batch is not None else set())
+            )
             merged.append(sec)
     merged.sort(key=lambda s: (s.page_start, s.page_end))
     return merged
@@ -492,6 +512,41 @@ def _fill_coverage_gaps(sections: List[Section], page_count: int) -> List[Sectio
     return kept
 
 
+def uniquify_titles(sections: List[Section]) -> List[Section]:
+    """Rename duplicate section titles ("X" -> "X (2)", "X (3)", ...) in place.
+
+    Downstream code -- resume, the fidelity report, the viewer -- keys on the
+    section title, so two distinct sections sharing one (SPDs bundling
+    several plans repeat headings like "Definitions") would be conflated:
+    resume would skip the second one entirely. Runs on the FINAL outline,
+    after grounding (a suffix would corrupt heading matching) and gap
+    filling. Generated names join the seen-set as they are created, so a
+    document genuinely containing both "X" twice and a literal "X (2)" still
+    ends up unique.
+    """
+    seen: set = set()
+    for sec in sections:
+        key = _normalize_title(sec.title)
+        if key not in seen:
+            seen.add(key)
+            continue
+        n = 2
+        while _normalize_title(f"{sec.title} ({n})") in seen:
+            n += 1
+        new_title = f"{sec.title} ({n})"
+        logger.warning(
+            "Reconcile: duplicate section title %r (pages %d-%d) renamed to "
+            "%r so it stays distinct for resume/fidelity/viewer",
+            sec.title,
+            sec.page_start,
+            sec.page_end,
+            new_title,
+        )
+        sec.title = new_title
+        seen.add(_normalize_title(new_title))
+    return sections
+
+
 def reconcile(
     partials: List[Dict[str, Any]],
     source_file: str,
@@ -505,7 +560,9 @@ def reconcile(
     filled, correcting printed-vs-physical page numbering from the model.
     """
     all_sections: List[Dict[str, Any]] = []
-    for p in partials:
+    for i, p in enumerate(partials):
+        for s in p.get("sections", []):
+            s["_batch"] = i  # provenance for _merge_sections' touch rule
         all_sections.extend(p.get("sections", []))
 
     sections = _merge_sections(all_sections)
@@ -523,7 +580,7 @@ def reconcile(
         effective_dates=_dedupe_strings(
             [d for p in partials for d in p.get("effective_dates", [])]
         ),
-        sections=_fill_coverage_gaps(sections, page_count),
+        sections=uniquify_titles(_fill_coverage_gaps(sections, page_count)),
         glossary=_merge_glossary([p.get("glossary", []) for p in partials]),
         cross_references=_sanitize_references(
             [c for p in partials for c in p.get("cross_references", [])]
