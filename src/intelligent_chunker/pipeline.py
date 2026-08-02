@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .analyze import analyze_document
 from .chunker import chunk_document
@@ -65,6 +65,7 @@ def run(
     client: Optional[object] = None,
     resume: bool = False,
     fidelity: bool = True,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> ChunkResult:
     """Chunk one PDF end to end.
 
@@ -74,6 +75,12 @@ def run(
     With ``resume=True``, an existing ``profile_path`` skips Pass 1 and an
     existing ``out_path`` skips every section that already finished, so an
     interrupted run only re-pays for the unfinished tail.
+
+    ``on_progress(phase, done, total)`` (if given) reports live progress with
+    phases ``"pass1"`` (batches), ``"pass2"`` (sections -- counts include
+    resumed-past sections so the bar is truthful on resume), and
+    ``"fidelity"``. A skipped Pass 1 reports (1, 1) so consumers see it
+    complete.
     """
     config = config or ChunkerConfig()
     client = client or make_client()
@@ -92,11 +99,20 @@ def run(
             profile_path,
             len(profile.sections),
         )
+        if on_progress:
+            on_progress("pass1", 1, 1)
 
     if profile is None:
         logger.info("Pass 1: analyzing %s", source_file)
+        pass1_progress = None
+        if on_progress:
+
+            def pass1_progress(done: int, total: int) -> None:
+                on_progress("pass1", done, total)
+
         profile = analyze_document(
-            client, config, pdf_bytes, source_file, usage=usage
+            client, config, pdf_bytes, source_file, usage=usage,
+            on_progress=pass1_progress,
         )
         logger.info("Pass 1: found %d sections", len(profile.sections))
         # Persist the profile before Pass 2 so a failure partway through the
@@ -142,11 +158,22 @@ def run(
                 )
             out_file.flush()
 
+    # Pass 2 progress counts the whole document: sections resumed past are
+    # already "done", so a resumed bar starts partway instead of lying at 0.
+    pass2_progress = None
+    if on_progress:
+        done_offset = len(profile.sections) - len(remaining)
+        total_sections = len(profile.sections)
+
+        def pass2_progress(done: int, total: int) -> None:
+            on_progress("pass2", done_offset + done, total_sections)
+
     try:
         new_chunks = chunk_document(
             client, config, pdf_bytes, profile, counter,
             on_section=on_section, usage=usage,
             sections=remaining, start_index=len(kept),
+            on_progress=pass2_progress,
         )
     finally:
         if out_file is not None:
@@ -158,7 +185,11 @@ def run(
     # persisted alongside the profile so the scores travel with the map.
     report = None
     if fidelity:
+        if on_progress:
+            on_progress("fidelity", 0, 1)
         report = fidelity_report(pdf_bytes, profile, chunks)
+        if on_progress:
+            on_progress("fidelity", 1, 1)
         if report["status"] == "ok":
             doc = report["document"]
             logger.info(

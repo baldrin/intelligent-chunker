@@ -378,3 +378,33 @@ def test_ground_sections_word_fallback_needs_unique_and_rare_words():
     ]
     out = analyze.ground_sections(sections, pages)
     assert [(s.page_start, s.page_end) for s in out] == [(1, 1), (2, 2)]
+
+
+def test_analyze_document_reports_batch_progress():
+    from conftest import FakeClient, make_pdf
+
+    from intelligent_chunker.config import ChunkerConfig
+
+    payload = {
+        "doc_type": "SPD",
+        "title": "T",
+        "plan_name": "",
+        "sponsor": "",
+        "effective_dates": [],
+        "sections": [_section("S", 1, 2)],
+        "glossary": [],
+        "cross_references": [],
+        "notes": "",
+    }
+    client = FakeClient([payload])
+    config = ChunkerConfig(
+        max_pages_per_batch=2, batch_overlap_pages=0, pass1_concurrency=3
+    )
+    events = []
+    analyze.analyze_document(
+        client, config, make_pdf(4), "x.pdf",
+        on_progress=lambda d, t: events.append((d, t)),
+    )
+    # 4 pages / 2 per batch = 2 batches; the counter is lock-guarded, so the
+    # sequence is exact even with parallel workers.
+    assert events == [(0, 2), (1, 2), (2, 2)]

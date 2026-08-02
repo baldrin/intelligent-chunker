@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import ChunkerConfig
 from .fidelity import extract_page_texts, match_key
@@ -149,28 +150,44 @@ def analyze_document(
     pdf_bytes: bytes,
     source_file: str,
     usage: Optional[UsageTracker] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> DocumentProfile:
-    """Run Pass 1 over the whole document and reconcile into one profile."""
+    """Run Pass 1 over the whole document and reconcile into one profile.
+
+    ``on_progress(done, total)`` (if given) fires once with (0, total) before
+    any batch is dispatched, then after each batch completes -- lock-guarded,
+    since batches run on worker threads.
+    """
     batches = iter_batches(
         pdf_bytes,
         config.max_pages_per_batch,
         config.batch_overlap_pages,
         max_encoded_bytes=config.max_encoded_request_bytes,
     )
+    total = len(batches)
+    done = 0
+    done_lock = threading.Lock()
+    if on_progress:
+        on_progress(0, total)
+
+    def _one(batch: PageBatch) -> Dict[str, Any]:
+        nonlocal done
+        partial = analyze_batch(client, config, batch, usage=usage)
+        if on_progress:
+            with done_lock:
+                done += 1
+                on_progress(done, total)
+        return partial
+
     workers = min(max(1, config.pass1_concurrency), len(batches) or 1)
     if workers <= 1:
-        partials = [analyze_batch(client, config, b, usage=usage) for b in batches]
+        partials = [_one(b) for b in batches]
     else:
         # Batches are independent; fan out. pool.map preserves batch order,
         # which reconcile relies on (first non-empty metadata wins, and batch
         # 1 holds the title page). The Anthropic client is thread-safe.
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            partials = list(
-                pool.map(
-                    lambda b: analyze_batch(client, config, b, usage=usage),
-                    batches,
-                )
-            )
+            partials = list(pool.map(_one, batches))
     page_count = batches[-1].page_end if batches else 0
     return reconcile(
         partials,

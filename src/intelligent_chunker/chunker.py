@@ -545,6 +545,7 @@ def chunk_document(
     usage: Optional[UsageTracker] = None,
     sections: Optional[List[Section]] = None,
     start_index: int = 0,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> List[Chunk]:
     """Run Pass 2 over every section and return density-packed chunks.
 
@@ -561,6 +562,9 @@ def chunk_document(
     ``on_section`` (if given) receives each section's finished chunks as soon
     as they exist, so callers can persist incrementally -- a failure partway
     through a long run then costs only the unfinished sections.
+
+    ``on_progress(done, total)`` (if given) fires with (0, total) up front,
+    then once per section as results are consumed in section order.
 
     ``sections``/``start_index`` support resuming: chunk only the given
     subset (default: all of ``profile.sections``) while keeping the full
@@ -585,6 +589,8 @@ def chunk_document(
         logger.info("Pass 2: using cached full-document mode")
 
     sections = list(profile.sections) if sections is None else list(sections)
+    if on_progress:
+        on_progress(0, len(sections))
 
     # Normalized text layer for per-chunk page grounding (empty for scanned
     # PDFs, in which case the model's self-reported pages stand).
@@ -654,6 +660,8 @@ def chunk_document(
         logger.info(
             "Pass 2: section %d/%d done: %s", pos, len(sections), section.title
         )
+        if on_progress:
+            on_progress(pos, len(sections))
         if not raw_chunks:
             logger.warning(
                 "Section %r (pages %d-%d) produced no chunks",
