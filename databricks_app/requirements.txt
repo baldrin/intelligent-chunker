@@ -1,0 +1,4 @@
+# Databricks App dependencies. Deployment layout: sync the repo as the app
+# source and copy this file plus app.yaml to the repo root (see
+# docs/databricks-app.md) -- then "." is the package itself.
+.[app,tokenizer]
