@@ -581,3 +581,21 @@ def test_word_fallback_ignores_generic_text():
     pieces = [{"text": generic, "page_start": 2, "page_end": 2}]
     out = chunker.ground_chunk_pages(pieces, norm, 1, 2, raw_pages=raw)
     assert (out[0]["page_start"], out[0]["page_end"]) == (2, 2)
+
+
+def test_chunk_document_reports_section_progress():
+    payload = {"chunks": [{"text": "a b c", "keywords": [], "cross_references": []}]}
+    client = FakeClient([payload])
+    config = ChunkerConfig(max_tokens=100, target_tokens=50, pass2_concurrency=2)
+    profile = DocumentProfile(
+        source_file="x.pdf",
+        page_count=2,
+        sections=[Section(f"S{i}", "general", "", i, i) for i in (1, 2)],
+    )
+    events = []
+    chunker.chunk_document(
+        client, config, make_pdf(2), profile, COUNTER,
+        on_progress=lambda d, t: events.append((d, t)),
+    )
+    # Results are consumed in section order, so progress is deterministic.
+    assert events == [(0, 2), (1, 2), (2, 2)]

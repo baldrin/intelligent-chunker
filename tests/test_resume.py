@@ -119,3 +119,38 @@ def test_run_resume_without_existing_files_runs_fresh(tmp_path):
     )
     assert len(client.messages.calls) == 2  # Pass 1 + one section
     assert len(result.chunks) == 1
+
+
+def test_run_reports_phase_progress_across_resume(tmp_path):
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(make_pdf(3))
+    out = tmp_path / "chunks.jsonl"
+    profile_path = tmp_path / "profile.json"
+    profile = DocumentProfile(
+        source_file="doc.pdf", page_count=3, sections=list(SECTIONS)
+    )
+    pipeline.write_profile(profile, str(profile_path))
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(json.dumps(_chunk("S1", 0, "kept text").to_dict()) + "\n")
+
+    payload = {"chunks": [{"text": "t", "keywords": [], "cross_references": []}]}
+    events = []
+    pipeline.run(
+        str(pdf),
+        config=_config(),
+        out_path=str(out),
+        profile_path=str(profile_path),
+        client=FakeClient([payload]),
+        resume=True,
+        on_progress=lambda p, d, t: events.append((p, d, t)),
+    )
+    # Skipped Pass 1 still reports complete.
+    assert events[0] == ("pass1", 1, 1)
+    # Pass 2 counts the whole document: S1 was resumed past, so the bar
+    # starts at 1/3 rather than lying at 0.
+    p2 = [e for e in events if e[0] == "pass2"]
+    assert p2[0] == ("pass2", 1, 3)
+    assert p2[-1] == ("pass2", 3, 3)
+    assert [d for _, d, _ in p2] == sorted(d for _, d, _ in p2)
+    # Fidelity closes the run (blank-page PDF -> report skipped, still ticked).
+    assert events[-1] == ("fidelity", 1, 1)
