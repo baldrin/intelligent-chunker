@@ -57,6 +57,11 @@ intelligent-chunker analyze path/to/spd.pdf --profile profile.json
 # curated chunks.jsonl for export. Decisions persist in the browser.
 intelligent-chunker view --chunks chunks.jsonl --profile profile.json --open
 
+# Or run the full web app (needs the `app` extra): upload an SPD, process
+# with a live progress meter, review/curate, save the curated JSONL server-
+# side. Also deploys as a Databricks App -- see docs/databricks-app.md.
+intelligent-chunker serve --port 8000
+
 # Export Databricks-ready Parquet tables (needs the `databricks` extra: pyarrow):
 intelligent-chunker export --chunks chunks.jsonl --profile profile.json \
     --out-dir databricks_export   # then load with databricks/build_vector_index.py

@@ -1,0 +1,30 @@
+# Databricks App definition for the SPD chunker web UI.
+#
+# Deploy: copy this directory (plus the repo, or install the package from a
+# wheel) into the app's source, then create the app pointing at it. See
+# docs/databricks-app.md for the full setup, permissions, and the in-tenant
+# verification checklist.
+command: ["uvicorn", "intelligent_chunker.webapp.app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+env:
+  # REQUIRED: a UC Volume path. The app instance's local disk is tiny --
+  # writing uploads or outputs to it will fill it and crash the app.
+  - name: CHUNKER_APP_DATA
+    value: "/Volumes/<catalog>/<schema>/<volume>/spd_chunker"
+
+  # Route Claude calls through this workspace's Anthropic passthrough.
+  - name: ANTHROPIC_BASE_URL
+    value: "https://<workspace-host>/serving-endpoints/anthropic"
+
+  # Bearer token for the serving endpoint, referenced from an app secret
+  # resource (name it when creating the app). A PAT works for bring-up; the
+  # app's service principal token is the durable choice -- verify the exact
+  # resource wiring in-tenant (checklist item 2 in docs/databricks-app.md).
+  - name: ANTHROPIC_AUTH_TOKEN
+    valueFrom: "anthropic-token"
+
+  # Exact GTE tokenizer without huggingface.co egress: put tokenizer.json in
+  # the volume and point at it (heuristic fallback degrades chunk sizing and
+  # the UI will warn loudly).
+  - name: CHUNKER_TOKENIZER
+    value: "/Volumes/<catalog>/<schema>/<volume>/spd_chunker/tokenizer.json"
