@@ -22,7 +22,16 @@ dependencies = [
 tokenizer = ["tokenizers>=0.15"]
 # Parquet export for Databricks AI Search (Delta-friendly typed tables).
 databricks = ["pyarrow>=14"]
-dev = ["pytest>=7.0", "pyarrow>=14", "ruff>=0.5", "tokenizers>=0.15"]
+# The web app (local `intelligent-chunker serve` and Databricks Apps).
+app = ["fastapi>=0.110", "uvicorn>=0.27"]
+dev = [
+    "pytest>=7.0",
+    "pyarrow>=14",
+    "ruff>=0.5",
+    "tokenizers>=0.15",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
 
 [project.scripts]
 intelligent-chunker = "intelligent_chunker.cli:main"
@@ -46,3 +55,4 @@ select = ["E", "F", "W", "I"]
 "databricks/build_vector_index.py" = ["F821", "E402"]
 # Long lines inside the inlined HTML/CSS/JS template string.
 "src/intelligent_chunker/viewer.py" = ["E501"]
+"src/intelligent_chunker/webapp/templates.py" = ["E501"]

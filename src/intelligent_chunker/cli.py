@@ -146,6 +146,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--open", action="store_true", help="Open the viewer in a browser."
     )
 
+    serve = sub.add_parser(
+        "serve",
+        help="Run the web app locally: upload an SPD, process with a "
+        "progress meter, review/curate the results.",
+    )
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--data-dir",
+        default=os.environ.get("CHUNKER_APP_DATA", "app_data"),
+        help="Root for uploads and job outputs (also via CHUNKER_APP_DATA). "
+        "On Databricks this must be a UC Volume path.",
+    )
+
     export = sub.add_parser(
         "export",
         help="Export Databricks-ready Parquet tables (chunks/documents/glossary).",
@@ -310,6 +324,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                     indent=2,
                 )
             print(f"Updated the fidelity block in {args.profile}.")
+        return 0
+
+    if args.command == "serve":
+        try:
+            import uvicorn
+
+            from .webapp.app import create_app
+        except ImportError:
+            print(
+                "The web app needs the 'app' extra: pip install -e '.[app]'",
+                file=sys.stderr,
+            )
+            return 1
+        uvicorn.run(
+            create_app(args.data_dir), host=args.host, port=args.port
+        )
         return 0
 
     if args.command == "view":

@@ -47,8 +47,20 @@ def _embed(data: Any) -> str:
     )
 
 
-def build_html(profile: Dict[str, Any], chunks: List[Dict[str, Any]]) -> str:
-    payload = _embed({"profile": profile, "chunks": chunks})
+def build_html(
+    profile: Dict[str, Any],
+    chunks: List[Dict[str, Any]],
+    save_url: str = "",
+) -> str:
+    """Render the viewer/curation page.
+
+    ``save_url`` (when the page is served by the web app) adds a "Save
+    curated to app" button that POSTs the curated JSONL back to the server;
+    the standalone CLI viewer omits it and keeps download-only behavior.
+    """
+    payload = _embed(
+        {"profile": profile, "chunks": chunks, "save_url": save_url}
+    )
     return _TEMPLATE.replace("/*__DATA__*/", "const DATA = " + payload + ";")
 
 
@@ -124,7 +136,13 @@ _TEMPLATE = r"""<!doctype html>
   .chip { background:var(--chip); color:var(--chip-ink); border-radius:10px; padding:1px 8px; font-size:11px; }
   .chip.xref { background:#fef3c7; color:#92400e; }
   .chip.edited { background:var(--ok); color:var(--ok-ink); }
+  .chip.flag { background:var(--warn); color:var(--warn-ink); font-weight:600; }
+  .flagdetail { background:var(--warn); color:var(--warn-ink); border-radius:8px;
+                padding:6px 10px; margin-bottom:8px; font-size:12px; }
+  .savestat { color:var(--muted); font-size:12px; max-width:340px; }
   .empty { color:var(--muted); padding:30px; text-align:center; }
+  .flagtoggle { display:flex; align-items:center; gap:5px; color:var(--ink);
+                cursor:pointer; user-select:none; white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -136,7 +154,9 @@ _TEMPLATE = r"""<!doctype html>
     </div>
     <div class="hactions">
       <span class="hstats" id="curStats"></span>
+      <span class="savestat" id="saveStat"></span>
       <button class="hbtn" id="resetBtn" title="Clear all curation decisions for this document">Reset</button>
+      <button class="hbtn" id="saveBtn" style="display:none" title="Save the curated JSONL back to the app (server re-checks token counts and fidelity)">Save curated to app</button>
       <button class="hbtn primary" id="dlBtn" title="Download a chunks.jsonl with exclusions dropped and edits applied">Download curated JSONL</button>
     </div>
   </div>
@@ -153,6 +173,9 @@ _TEMPLATE = r"""<!doctype html>
   <main>
     <div class="controls">
       <input id="search" type="search" placeholder="Search chunk text, keywords, section…">
+      <label class="flagtoggle" id="flagToggleWrap" style="display:none">
+        <input type="checkbox" id="flagOnly"> flagged only (<span id="flagCount"></span>)
+      </label>
       <span class="stats" id="stats"></span>
     </div>
     <div id="chunkList"></div>
@@ -163,8 +186,18 @@ _TEMPLATE = r"""<!doctype html>
 (function () {
   const profile = DATA.profile || {};
   const chunks = DATA.chunks || [];
+  const saveUrl = DATA.save_url || "";
   let activeSection = null;
   let query = "";
+  let flaggedOnly = false;
+
+  // Fidelity flags (profile.fidelity.chunks) keyed by chunk_index: the
+  // triage the reviewer should clear first.
+  const flagByIndex = {};
+  (((profile.fidelity || {}).chunks) || []).forEach(f => {
+    flagByIndex[f.chunk_index] = f;
+  });
+  const flaggedTotal = Object.keys(flagByIndex).length;
 
   // --- curation state (persisted in localStorage so a review survives a
   // closed tab; keyed by document so different SPDs don't collide) ---------
@@ -201,7 +234,7 @@ _TEMPLATE = r"""<!doctype html>
     return Math.floor(pieces * 1.3) + 1;
   }
 
-  function downloadCurated() {
+  function curatedJsonl() {
     const lines = [];
     chunks.forEach(c => {
       if (!isIncluded(c)) return;
@@ -213,13 +246,44 @@ _TEMPLATE = r"""<!doctype html>
       }
       lines.push(JSON.stringify(out));
     });
+    return lines.join("\n") + "\n";
+  }
+
+  function downloadCurated() {
     const base = (profile.source_file || "chunks").replace(/\.pdf$/i, "");
-    const blob = new Blob([lines.join("\n") + "\n"], { type: "application/json" });
+    const blob = new Blob([curatedJsonl()], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = base + ".curated.jsonl";
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+
+  async function saveCurated() {
+    const stat = document.getElementById("saveStat");
+    stat.textContent = "saving…";
+    let resp;
+    try {
+      resp = await fetch(saveUrl, { method: "POST", body: curatedJsonl() });
+    } catch (e) {
+      stat.textContent = "save failed: " + e;
+      return;
+    }
+    if (!resp.ok) {
+      const detail = (await resp.json().catch(() => ({}))).detail || resp.statusText;
+      stat.textContent = "save failed: " + detail;
+      return;
+    }
+    const r = await resp.json();
+    const parts = ["saved " + r.saved];
+    if (r.fidelity && r.fidelity.coverage != null) {
+      parts.push("coverage " + r.fidelity.coverage + " · novelty " + r.fidelity.novelty);
+    }
+    if (!r.exact_token_counts) parts.push("WARNING: heuristic token counts");
+    if (r.over_max_tokens && r.over_max_tokens.length) {
+      parts.push("OVER TOKEN LIMIT: chunk " + r.over_max_tokens.join(", "));
+    }
+    stat.textContent = parts.join("  ·  ");
   }
 
   const el = (tag, cls, txt) => {
@@ -236,6 +300,19 @@ _TEMPLATE = r"""<!doctype html>
     [profile.doc_type, profile.source_file, profile.page_count ? profile.page_count + " pages" : ""]
       .filter(Boolean).join("  ·  ");
   document.getElementById("dlBtn").onclick = downloadCurated;
+  if (saveUrl) {
+    const saveBtn = document.getElementById("saveBtn");
+    saveBtn.style.display = "";
+    saveBtn.onclick = saveCurated;
+  }
+  if (flaggedTotal) {
+    document.getElementById("flagToggleWrap").style.display = "";
+    document.getElementById("flagCount").textContent = String(flaggedTotal);
+    document.getElementById("flagOnly").addEventListener("change", e => {
+      flaggedOnly = e.target.checked;
+      render();
+    });
+  }
   document.getElementById("resetBtn").onclick = () => {
     if (!Object.keys(decisions).length) return;
     if (!confirm("Clear all include/exclude decisions and edits for this document?")) return;
@@ -335,6 +412,7 @@ _TEMPLATE = r"""<!doctype html>
   const curStats = document.getElementById("curStats");
 
   function matches(c) {
+    if (flaggedOnly && !flagByIndex[c.chunk_index]) return false;
     if (activeSection && c.section_title !== activeSection) return false;
     if (!query) return true;
     const hay = (effectiveText(c) + " " + (c.keywords || []).join(" ") + " " + c.section_title).toLowerCase();
@@ -382,6 +460,23 @@ _TEMPLATE = r"""<!doctype html>
     const editBtn = el("button", "editbtn", "Edit");
     bar.appendChild(editBtn);
     card.appendChild(bar);
+    const flag = flagByIndex[c.chunk_index];
+    if (flag) {
+      bar.insertBefore(
+        el("span", "chip flag", "⚠ novelty " + flag.novelty), editBtn
+      );
+      const lines = flag.novel_lines || [];
+      const hints = flag.novel_line_hints || [];
+      const details = lines.map(
+        (l, i) => "“" + l + "”" + (hints[i] ? "  [" + hints[i] + "]" : "")
+      );
+      card.appendChild(el(
+        "div", "flagdetail",
+        details.length
+          ? "Fidelity: " + details.join("   ")
+          : "Fidelity: chunk text poorly matched to its claimed pages"
+      ));
+    }
     const textDiv = el("div", "text", effectiveText(c));
     card.appendChild(textDiv);
     editBtn.onclick = () => beginEdit(card, textDiv, c);
