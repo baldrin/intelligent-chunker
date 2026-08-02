@@ -52,7 +52,9 @@ intelligent-chunker chunk path/to/spd.pdf --out chunks.jsonl --profile profile.j
 # Or run Pass 1 alone and inspect the map before paying for Pass 2:
 intelligent-chunker analyze path/to/spd.pdf --profile profile.json
 
-# Browse the output in a self-contained HTML viewer (no server needed):
+# Review + curate in a self-contained HTML tool (no server needed): edit
+# chunk text, include/exclude chunks or whole sections, then download the
+# curated chunks.jsonl for export. Decisions persist in the browser.
 intelligent-chunker view --chunks chunks.jsonl --profile profile.json --open
 
 # Export Databricks-ready Parquet tables (needs the `databricks` extra: pyarrow):

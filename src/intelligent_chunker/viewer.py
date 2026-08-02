@@ -1,8 +1,18 @@
-"""Build a self-contained HTML viewer for a chunks.jsonl + profile.json pair.
+"""Build a self-contained HTML viewer/curation tool for a chunks.jsonl +
+profile.json pair.
 
 The data is embedded directly in the page (no server, no network), so the
 output is a single file you can open in any browser. Chunk text is rendered via
 the DOM (textContent), so document content can't break the page or inject HTML.
+
+Beyond browsing, the page is a curation editor: a reviewer can exclude chunks
+(or whole sections) via checkboxes, edit chunk text in place, and download the
+curated result as a new chunks.jsonl -- excluded chunks dropped, edits applied
+-- which feeds `export` and everything downstream unchanged. Decisions persist
+in the browser's localStorage (keyed by source file + chunk count) so a review
+survives closing the tab; Reset clears them. Edited chunks get a heuristic
+token estimate and an ``edited: true`` marker, since the exact GTE tokenizer
+isn't available in the browser.
 """
 
 from __future__ import annotations
@@ -47,29 +57,40 @@ _TEMPLATE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Intelligent Chunker — Viewer</title>
+<title>Intelligent Chunker — Review &amp; Curate</title>
 <style>
   :root {
     --bg:#f6f7f9; --panel:#fff; --ink:#1d2330; --muted:#6b7280;
     --line:#e5e7eb; --accent:#2563eb; --chip:#eef2ff; --chip-ink:#3730a3;
+    --ok:#dcfce7; --ok-ink:#166534; --warn:#fee2e2; --warn-ink:#991b1b;
   }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
          color:var(--ink); background:var(--bg); }
-  header { background:var(--panel); border-bottom:1px solid var(--line); padding:14px 20px; }
+  header { background:var(--panel); border-bottom:1px solid var(--line); padding:12px 20px; }
+  .hrow { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
   header h1 { margin:0; font-size:16px; }
   header .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+  .hactions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .hstats { color:var(--muted); font-size:12px; }
+  .hbtn { font:inherit; font-size:13px; padding:7px 12px; border-radius:8px; cursor:pointer;
+          border:1px solid var(--line); background:var(--panel); color:var(--ink); }
+  .hbtn:hover { border-color:var(--accent); }
+  .hbtn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   .layout { display:flex; align-items:flex-start; gap:0; }
-  aside { width:320px; min-width:320px; height:calc(100vh - 56px); overflow:auto;
+  aside { width:340px; min-width:340px; height:calc(100vh - 62px); overflow:auto;
           background:var(--panel); border-right:1px solid var(--line); padding:16px; position:sticky; top:0; }
-  main { flex:1; padding:16px 20px; height:calc(100vh - 56px); overflow:auto; }
+  main { flex:1; padding:16px 20px; height:calc(100vh - 62px); overflow:auto; }
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:18px 0 8px; }
   .meta-row { display:flex; justify-content:space-between; gap:10px; padding:3px 0; border-bottom:1px dashed var(--line); }
   .meta-row .k { color:var(--muted); }
   .meta-row .v { text-align:right; font-weight:500; }
-  .sec { display:flex; justify-content:space-between; align-items:center; gap:8px; width:100%;
+  .secrow { display:flex; align-items:center; gap:7px; margin:5px 0; }
+  .secrow .spacer { width:16px; min-width:16px; }
+  .seccb { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
+  .sec { display:flex; justify-content:space-between; align-items:center; gap:8px; flex:1;
          text-align:left; background:none; border:1px solid var(--line); border-radius:8px;
-         padding:7px 10px; margin:5px 0; cursor:pointer; color:inherit; font:inherit; }
+         padding:7px 10px; cursor:pointer; color:inherit; font:inherit; }
   .sec:hover { border-color:var(--accent); }
   .sec.active { background:var(--accent); color:#fff; border-color:var(--accent); }
   .sec .t { display:flex; flex-direction:column; }
@@ -85,21 +106,40 @@ _TEMPLATE = r"""<!doctype html>
   .controls input { flex:1; min-width:220px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; font:inherit; }
   .stats { color:var(--muted); font-size:12px; }
   .chunk { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  .chunk.excluded { opacity:.45; border-style:dashed; }
   .chunk .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px; font-size:12px; color:var(--muted); }
   .chunk .idx { font-weight:700; color:var(--ink); }
   .chunk .sect { background:var(--chip); color:var(--chip-ink); border-radius:10px; padding:1px 8px; font-weight:600; }
   .chunk .tok { margin-left:auto; }
   .chunk .text { white-space:pre-wrap; }
+  .inc { display:flex; align-items:center; gap:5px; cursor:pointer; color:var(--ink); user-select:none; }
+  .inc input { width:15px; height:15px; accent-color:var(--accent); cursor:pointer; }
+  .editbtn { font:inherit; font-size:12px; padding:3px 10px; border-radius:7px; cursor:pointer;
+             border:1px solid var(--line); background:var(--panel); color:var(--ink); }
+  .editbtn:hover { border-color:var(--accent); }
+  .editor { width:100%; min-height:150px; font:inherit; padding:10px; border:1px solid var(--accent);
+            border-radius:8px; resize:vertical; }
+  .editrow { display:flex; gap:8px; margin-top:8px; }
   .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
   .chip { background:var(--chip); color:var(--chip-ink); border-radius:10px; padding:1px 8px; font-size:11px; }
   .chip.xref { background:#fef3c7; color:#92400e; }
+  .chip.edited { background:var(--ok); color:var(--ok-ink); }
   .empty { color:var(--muted); padding:30px; text-align:center; }
 </style>
 </head>
 <body>
 <header>
-  <h1 id="docTitle"></h1>
-  <div class="sub" id="docSub"></div>
+  <div class="hrow">
+    <div>
+      <h1 id="docTitle"></h1>
+      <div class="sub" id="docSub"></div>
+    </div>
+    <div class="hactions">
+      <span class="hstats" id="curStats"></span>
+      <button class="hbtn" id="resetBtn" title="Clear all curation decisions for this document">Reset</button>
+      <button class="hbtn primary" id="dlBtn" title="Download a chunks.jsonl with exclusions dropped and edits applied">Download curated JSONL</button>
+    </div>
+  </div>
 </header>
 <div class="layout">
   <aside>
@@ -126,6 +166,62 @@ _TEMPLATE = r"""<!doctype html>
   let activeSection = null;
   let query = "";
 
+  // --- curation state (persisted in localStorage so a review survives a
+  // closed tab; keyed by document so different SPDs don't collide) ---------
+  const storeKey = "chunker-curation:" + (profile.source_file || "doc") + ":" + chunks.length;
+  let decisions = {};   // chunk_index -> { inc: false } and/or { text: "..." }
+  try { decisions = JSON.parse(localStorage.getItem(storeKey) || "{}") || {}; }
+  catch (e) { decisions = {}; }
+  function saveDecisions() {
+    try { localStorage.setItem(storeKey, JSON.stringify(decisions)); } catch (e) {}
+  }
+  const dec = c => decisions[c.chunk_index] || {};
+  const isIncluded = c => dec(c).inc !== false;
+  const isEdited = c => dec(c).text != null;
+  const effectiveText = c => (dec(c).text != null ? dec(c).text : c.text);
+  function touch(c) { return decisions[c.chunk_index] || (decisions[c.chunk_index] = {}); }
+  function prune(c) {
+    const d = decisions[c.chunk_index];
+    if (d && d.inc === undefined && d.text === undefined) delete decisions[c.chunk_index];
+  }
+  function setIncluded(c, v) {
+    const d = touch(c);
+    if (v) delete d.inc; else d.inc = false;
+    prune(c); saveDecisions();
+  }
+  function setText(c, t) {
+    const d = touch(c);
+    if (t === c.text) delete d.text; else d.text = t;
+    prune(c); saveDecisions();
+  }
+  // Mirrors the pipeline's HeuristicTokenCounter: the exact GTE tokenizer
+  // isn't available in a browser, so edited chunks get an estimate.
+  function estTokens(t) {
+    const pieces = (t.match(/\w+|[^\w\s]/g) || []).length;
+    return Math.floor(pieces * 1.3) + 1;
+  }
+
+  function downloadCurated() {
+    const lines = [];
+    chunks.forEach(c => {
+      if (!isIncluded(c)) return;
+      const out = Object.assign({}, c);
+      if (isEdited(c)) {
+        out.text = effectiveText(c);
+        out.token_count = estTokens(out.text);
+        out.edited = true;
+      }
+      lines.push(JSON.stringify(out));
+    });
+    const base = (profile.source_file || "chunks").replace(/\.pdf$/i, "");
+    const blob = new Blob([lines.join("\n") + "\n"], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = base + ".curated.jsonl";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   const el = (tag, cls, txt) => {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -139,6 +235,14 @@ _TEMPLATE = r"""<!doctype html>
   document.getElementById("docSub").textContent =
     [profile.doc_type, profile.source_file, profile.page_count ? profile.page_count + " pages" : ""]
       .filter(Boolean).join("  ·  ");
+  document.getElementById("dlBtn").onclick = downloadCurated;
+  document.getElementById("resetBtn").onclick = () => {
+    if (!Object.keys(decisions).length) return;
+    if (!confirm("Clear all include/exclude decisions and edits for this document?")) return;
+    decisions = {};
+    try { localStorage.removeItem(storeKey); } catch (e) {}
+    render();
+  };
 
   const metaBox = document.getElementById("metaBox");
   const metaRows = [
@@ -160,7 +264,7 @@ _TEMPLATE = r"""<!doctype html>
   const counts = {};
   chunks.forEach(c => { counts[c.section_title] = (counts[c.section_title] || 0) + 1; });
 
-  // Section list (click to filter)
+  // Section list: a bulk include/exclude checkbox + a filter button per row.
   const sectionBox = document.getElementById("sectionBox");
   function makeSectionButton(title, pages, n, type) {
     const b = el("button", "sec");
@@ -174,13 +278,29 @@ _TEMPLATE = r"""<!doctype html>
     b.onclick = () => { activeSection = (activeSection === title) ? null : title; render(); };
     return b;
   }
+  const allRow = el("div", "secrow");
+  allRow.appendChild(el("span", "spacer"));
   const allBtn = makeSectionButton("All sections", "", chunks.length, "");
   allBtn.dataset.section = "";
   allBtn.onclick = () => { activeSection = null; render(); };
-  sectionBox.appendChild(allBtn);
+  allRow.appendChild(allBtn);
+  sectionBox.appendChild(allRow);
   (profile.sections || []).forEach(s => {
+    const row = el("div", "secrow");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "seccb";
+    cb.dataset.sec = s.title;
+    cb.title = "Include/exclude every chunk in this section";
+    cb.onchange = () => {
+      chunks.filter(c => c.section_title === s.title)
+            .forEach(c => setIncluded(c, cb.checked));
+      render();
+    };
+    row.appendChild(cb);
     const pages = "p" + s.page_start + (s.page_end !== s.page_start ? "–" + s.page_end : "");
-    sectionBox.appendChild(makeSectionButton(s.title, pages, counts[s.title] || 0, s.section_type));
+    row.appendChild(makeSectionButton(s.title, pages, counts[s.title] || 0, s.section_type));
+    sectionBox.appendChild(row);
   });
 
   // Glossary
@@ -212,25 +332,59 @@ _TEMPLATE = r"""<!doctype html>
 
   const list = document.getElementById("chunkList");
   const stats = document.getElementById("stats");
+  const curStats = document.getElementById("curStats");
 
   function matches(c) {
     if (activeSection && c.section_title !== activeSection) return false;
     if (!query) return true;
-    const hay = (c.text + " " + (c.keywords || []).join(" ") + " " + c.section_title).toLowerCase();
+    const hay = (effectiveText(c) + " " + (c.keywords || []).join(" ") + " " + c.section_title).toLowerCase();
     return hay.includes(query);
   }
 
+  function beginEdit(card, textDiv, c) {
+    const ta = document.createElement("textarea");
+    ta.className = "editor";
+    ta.value = effectiveText(c);
+    const row = el("div", "editrow");
+    const save = el("button", "editbtn", "Save");
+    const cancel = el("button", "editbtn", "Cancel");
+    row.appendChild(save);
+    row.appendChild(cancel);
+    card.replaceChild(ta, textDiv);
+    card.insertBefore(row, ta.nextSibling);
+    ta.focus();
+    save.onclick = () => { setText(c, ta.value); render(); };
+    cancel.onclick = () => render();
+  }
+
   function chunkCard(c) {
-    const card = el("div", "chunk");
+    const card = el("div", "chunk" + (isIncluded(c) ? "" : " excluded"));
     const bar = el("div", "bar");
+    const lab = el("label", "inc");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = isIncluded(c);
+    cb.onchange = () => { setIncluded(c, cb.checked); render(); };
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode("include"));
+    bar.appendChild(lab);
     bar.appendChild(el("span", "idx", "#" + c.chunk_index));
     bar.appendChild(el("span", "sect", c.section_title));
     const pages = "p" + c.page_start + (c.page_end !== c.page_start ? "–" + c.page_end : "");
     bar.appendChild(el("span", null, pages));
     if (c.section_type) bar.appendChild(el("span", null, c.section_type));
-    bar.appendChild(el("span", "tok", (c.token_count != null ? c.token_count : "?") + " tok"));
+    if (isEdited(c)) {
+      bar.appendChild(el("span", "chip edited", "edited · ~" + estTokens(effectiveText(c)) + " tok"));
+    }
+    bar.appendChild(el("span", "tok",
+      isEdited(c) ? "was " + (c.token_count != null ? c.token_count : "?") + " tok"
+                  : (c.token_count != null ? c.token_count : "?") + " tok"));
+    const editBtn = el("button", "editbtn", "Edit");
+    bar.appendChild(editBtn);
     card.appendChild(bar);
-    card.appendChild(el("div", "text", c.text));
+    const textDiv = el("div", "text", effectiveText(c));
+    card.appendChild(textDiv);
+    editBtn.onclick = () => beginEdit(card, textDiv, c);
     const chips = el("div", "chips");
     (c.keywords || []).forEach(k => chips.appendChild(el("span", "chip", k)));
     (c.cross_references || []).forEach(x => chips.appendChild(el("span", "chip xref", "→ " + x)));
@@ -243,6 +397,12 @@ _TEMPLATE = r"""<!doctype html>
       const s = b.dataset.section;
       b.classList.toggle("active", (activeSection || "") === s);
     });
+    document.querySelectorAll(".seccb").forEach(cb => {
+      const secChunks = chunks.filter(c => c.section_title === cb.dataset.sec);
+      const inc = secChunks.filter(isIncluded).length;
+      cb.checked = secChunks.length > 0 && inc === secChunks.length;
+      cb.indeterminate = inc > 0 && inc < secChunks.length;
+    });
     const shown = chunks.filter(matches);
     list.innerHTML = "";
     if (!shown.length) {
@@ -252,8 +412,14 @@ _TEMPLATE = r"""<!doctype html>
     }
     const toks = shown.map(c => c.token_count || 0).filter(t => t > 0).sort((a, b) => a - b);
     const med = toks.length ? toks[Math.floor(toks.length / 2)] : 0;
+    const exShown = shown.filter(c => !isIncluded(c)).length;
     stats.textContent = shown.length + " of " + chunks.length + " chunks"
+      + (exShown ? "  ·  " + exShown + " excluded here" : "")
       + (toks.length ? "  ·  median " + med + " tok  ·  range " + toks[0] + "–" + toks[toks.length - 1] : "");
+    const included = chunks.filter(isIncluded).length;
+    const edited = chunks.filter(isEdited).length;
+    curStats.textContent = "curated: " + included + " of " + chunks.length + " included"
+      + (edited ? "  ·  " + edited + " edited" : "");
   }
 
   document.getElementById("search").addEventListener("input", e => {
