@@ -135,7 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     view = sub.add_parser(
-        "view", help="Build a self-contained HTML viewer for the output."
+        "view",
+        help="Build a self-contained HTML viewer/curation tool: review "
+        "chunks, edit text, include/exclude, download a curated JSONL.",
     )
     view.add_argument("--chunks", default="chunks.jsonl", help="Chunks JSONL path.")
     view.add_argument("--profile", default="profile.json", help="Profile JSON path.")
