@@ -27,8 +27,10 @@ logger = logging.getLogger(__name__)
 # than guessing.
 _PRICING = {
     "claude-haiku-4-5": (1.00, 5.00, 1.25, 0.10),
+    "claude-sonnet-4": (3.00, 15.00, 3.75, 0.30),
     "claude-sonnet-5": (3.00, 15.00, 3.75, 0.30),
     "claude-opus-4": (5.00, 25.00, 6.25, 0.50),
+    "claude-opus-5": (5.00, 25.00, 6.25, 0.50),
     "databricks-claude-haiku": (1.00, 5.00, 1.25, 0.10),
     "databricks-claude-sonnet": (3.00, 15.00, 3.75, 0.30),
     "databricks-claude-opus": (5.00, 25.00, 6.25, 0.50),
