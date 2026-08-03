@@ -20,12 +20,18 @@ logger = logging.getLogger(__name__)
 # USD per million tokens, keyed by model-id prefix:
 # (input, output, cache write @5min TTL, cache read).
 # Verified against Anthropic pricing 2026-07 (cache write = 1.25x input,
-# cache read = 0.1x input). Unknown models report tokens without a dollar
-# estimate rather than guessing.
+# cache read = 0.1x input). Databricks-served Claude endpoints bill the same
+# per-token rates (per our tenant's rate card, 2026-08), keyed by the
+# databricks-* model names; version-less prefixes so any served revision
+# matches. Unknown models report tokens without a dollar estimate rather
+# than guessing.
 _PRICING = {
     "claude-haiku-4-5": (1.00, 5.00, 1.25, 0.10),
     "claude-sonnet-5": (3.00, 15.00, 3.75, 0.30),
     "claude-opus-4": (5.00, 25.00, 6.25, 0.50),
+    "databricks-claude-haiku": (1.00, 5.00, 1.25, 0.10),
+    "databricks-claude-sonnet": (3.00, 15.00, 3.75, 0.30),
+    "databricks-claude-opus": (5.00, 25.00, 6.25, 0.50),
 }
 
 
