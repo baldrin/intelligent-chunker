@@ -27,6 +27,23 @@ def test_tracker_cost_estimate_known_model():
     assert "$" in tracker.summary()
 
 
+def test_tracker_as_dict_snapshot():
+    tracker = UsageTracker()
+    tracker.record("claude-haiku-4-5", FakeUsage())
+    snapshot = tracker.as_dict()
+    assert snapshot["calls"] == 1
+    assert snapshot["input_tokens"] == 100
+    assert snapshot["output_tokens"] == 10
+    assert snapshot["cache_creation_input_tokens"] == 5
+    assert snapshot["cache_read_input_tokens"] == 50
+    assert snapshot["estimated_cost_usd"] == tracker.estimated_cost_usd()
+    assert snapshot["summary"] == tracker.summary()
+
+    unknown = UsageTracker()
+    unknown.record("some-future-model", FakeUsage())
+    assert unknown.as_dict()["estimated_cost_usd"] is None
+
+
 def test_tracker_cost_estimate_databricks_models():
     # Databricks-served endpoints bill the same per-token rates; the prefix
     # is version-less so any served revision (e.g. sonnet-4-6) matches.

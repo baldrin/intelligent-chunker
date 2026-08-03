@@ -99,6 +99,13 @@ class UsageTracker:
                 ) / 1_000_000
             return total
 
+    def as_dict(self) -> Dict[str, Any]:
+        """JSON-friendly snapshot for persistence (job.json) and UIs."""
+        out: Dict[str, Any] = {"calls": self.calls, **self.totals()}
+        out["estimated_cost_usd"] = self.estimated_cost_usd()
+        out["summary"] = self.summary()
+        return out
+
     def summary(self) -> str:
         """One human-readable line for the end of a run."""
         t = self.totals()
