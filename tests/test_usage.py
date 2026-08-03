@@ -36,6 +36,13 @@ def test_tracker_cost_estimate_sonnet_4_direct():
     assert abs(tracker.estimated_cost_usd() - expected) < 1e-12
 
 
+def test_tracker_cost_estimate_opus_5_direct():
+    tracker = UsageTracker()
+    tracker.record("claude-opus-5", FakeUsage())
+    expected = (100 * 5.00 + 10 * 25.00 + 5 * 6.25 + 50 * 0.50) / 1_000_000
+    assert abs(tracker.estimated_cost_usd() - expected) < 1e-12
+
+
 def test_tracker_cost_estimate_databricks_models():
     # Databricks-served endpoints bill the same per-token rates; the prefix
     # is version-less so any served revision (e.g. sonnet-4-6) matches.
