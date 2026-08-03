@@ -53,6 +53,7 @@ def test_full_flow_upload_process_review_curate(tmp_path):
     index = client.get("/")
     assert index.status_code == 200
     assert "Sonnet" in index.text and "Haiku" in index.text
+    assert "Cache W" in index.text and "Cost" in index.text  # usage columns
 
     # Upload: raw body, no multipart.
     resp = client.post(
@@ -66,7 +67,14 @@ def test_full_flow_upload_process_review_curate(tmp_path):
 
     status = _wait_done(client, job_id)
     assert status["state"] == "done", status.get("error")
-    assert status["usage"]  # tracker summary line present
+    usage = status["usage"]  # structured tracker snapshot for the jobs table
+    assert usage["calls"] == 2  # Pass 1 + Pass 2
+    assert usage["input_tokens"] == 200
+    assert usage["output_tokens"] == 20
+    assert usage["cache_creation_input_tokens"] == 10
+    assert usage["cache_read_input_tokens"] == 100
+    assert usage["estimated_cost_usd"] > 0  # haiku pricing is known
+    assert "$" in usage["summary"]
     assert status["quality"]["fidelity_status"] in ("ok", "skipped")
     assert status["quality"]["exact_tokens"] in (True, False)
 

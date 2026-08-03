@@ -27,6 +27,23 @@ def test_tracker_cost_estimate_known_model():
     assert "$" in tracker.summary()
 
 
+def test_tracker_as_dict_snapshot():
+    tracker = UsageTracker()
+    tracker.record("claude-haiku-4-5", FakeUsage())
+    snapshot = tracker.as_dict()
+    assert snapshot["calls"] == 1
+    assert snapshot["input_tokens"] == 100
+    assert snapshot["output_tokens"] == 10
+    assert snapshot["cache_creation_input_tokens"] == 5
+    assert snapshot["cache_read_input_tokens"] == 50
+    assert snapshot["estimated_cost_usd"] == tracker.estimated_cost_usd()
+    assert snapshot["summary"] == tracker.summary()
+
+    unknown = UsageTracker()
+    unknown.record("some-future-model", FakeUsage())
+    assert unknown.as_dict()["estimated_cost_usd"] is None
+
+
 def test_tracker_cost_estimate_sonnet_4_direct():
     # The web app's direct-API picker offers claude-sonnet-4-6, which the
     # old claude-sonnet-5 prefix silently failed to price.

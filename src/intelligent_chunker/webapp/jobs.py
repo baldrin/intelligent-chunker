@@ -244,7 +244,7 @@ class JobManager:
                 job_id,
                 state="done",
                 finished_at=time.time(),
-                usage=result.usage.summary() if result.usage else None,
+                usage=result.usage.as_dict() if result.usage else None,
                 quality=quality_summary(result.fidelity, exact),
             )
         except Exception as exc:

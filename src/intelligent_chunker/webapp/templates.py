@@ -16,7 +16,7 @@ INDEX_HTML = r"""<!doctype html>
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
          color:var(--ink); background:var(--bg); }
-  .wrap { max-width:760px; margin:0 auto; padding:28px 20px; }
+  .wrap { max-width:960px; margin:0 auto; padding:28px 20px; }
   h1 { font-size:20px; margin:0 0 4px; }
   .sub { color:var(--muted); margin-bottom:22px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
@@ -40,6 +40,7 @@ INDEX_HTML = r"""<!doctype html>
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:600; }
+  .num { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
   a { color:var(--accent); }
   .muted { color:var(--muted); }
 </style>
@@ -79,7 +80,8 @@ INDEX_HTML = r"""<!doctype html>
   <div class="card">
     <h2 style="font-size:14px;margin:0 0 10px">Jobs</h2>
     <table>
-      <thead><tr><th>File</th><th>Model</th><th>State</th><th>Quality</th><th></th></tr></thead>
+      <thead><tr><th>File</th><th>Model</th><th>State</th><th>Quality</th>
+        <th class="num">In</th><th class="num">Out</th><th class="num">Cache W</th><th class="num">Cache R</th><th class="num">Cost</th><th></th></tr></thead>
       <tbody id="jobRows"></tbody>
     </table>
   </div>
@@ -129,6 +131,32 @@ INDEX_HTML = r"""<!doctype html>
     return node;
   }
 
+  function fmtTokens(n) {
+    if (n == null) return "—";
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e4) return Math.round(n / 1e3) + "k";
+    return n.toLocaleString();
+  }
+
+  function usageCells(tr, j) {
+    // Jobs from before structured usage persisted only a summary string.
+    const u = (j.usage && typeof j.usage === "object") ? j.usage : null;
+    const legacy = (typeof j.usage === "string") ? j.usage : null;
+    ["input_tokens", "output_tokens",
+     "cache_creation_input_tokens", "cache_read_input_tokens"].forEach(f => {
+      const n = u ? u[f] : null;
+      const td = el("td", "num", fmtTokens(n));
+      if (n != null) td.title = n.toLocaleString() + " tokens";
+      else if (legacy) td.title = legacy;
+      tr.appendChild(td);
+    });
+    const cost = u ? u.estimated_cost_usd : null;
+    const td = el("td", "num", cost != null ? "$" + cost.toFixed(4) : "—");
+    if (u && cost == null) td.title = "no pricing known for this model";
+    else if (legacy) td.title = legacy;
+    tr.appendChild(td);
+  }
+
   async function refreshJobs() {
     const rows = $("jobRows");
     let jobs = [];
@@ -148,6 +176,7 @@ INDEX_HTML = r"""<!doctype html>
         q.appendChild(el("span", "muted", "error"));
       }
       tr.appendChild(q);
+      usageCells(tr, j);
       const links = el("td");
       if (j.state === "done") {
         const a = el("a", null, "review");
@@ -187,7 +216,8 @@ INDEX_HTML = r"""<!doctype html>
         const a = el("a", null, "Open the review & curation page");
         a.href = "/jobs/" + jobId + "/results";
         p.appendChild(a);
-        if (s.usage) p.appendChild(el("div", "muted", s.usage));
+        if (s.usage) p.appendChild(el("div", "muted",
+          typeof s.usage === "object" ? s.usage.summary : s.usage));
         msg.appendChild(p);
         break;
       }
