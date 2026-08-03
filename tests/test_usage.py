@@ -27,6 +27,25 @@ def test_tracker_cost_estimate_known_model():
     assert "$" in tracker.summary()
 
 
+def test_tracker_cost_estimate_databricks_models():
+    # Databricks-served endpoints bill the same per-token rates; the prefix
+    # is version-less so any served revision (e.g. sonnet-4-6) matches.
+    tracker = UsageTracker()
+    tracker.record("databricks-claude-haiku-4-5", FakeUsage())
+    expected = (100 * 1.00 + 10 * 5.00 + 5 * 1.25 + 50 * 0.10) / 1_000_000
+    assert abs(tracker.estimated_cost_usd() - expected) < 1e-12
+
+    sonnet = UsageTracker()
+    sonnet.record("databricks-claude-sonnet-4-6", FakeUsage())
+    expected = (100 * 3.00 + 10 * 15.00 + 5 * 3.75 + 50 * 0.30) / 1_000_000
+    assert abs(sonnet.estimated_cost_usd() - expected) < 1e-12
+
+    opus = UsageTracker()
+    opus.record("databricks-claude-opus-4-1", FakeUsage())
+    expected = (100 * 5.00 + 10 * 25.00 + 5 * 6.25 + 50 * 0.50) / 1_000_000
+    assert abs(opus.estimated_cost_usd() - expected) < 1e-12
+
+
 def test_tracker_unknown_model_reports_tokens_without_cost():
     tracker = UsageTracker()
     tracker.record("some-future-model", FakeUsage())
