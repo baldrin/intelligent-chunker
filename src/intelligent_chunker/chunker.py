@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from .config import ChunkerConfig
@@ -58,6 +59,18 @@ PASS2_SYSTEM_FULL_DOC = (
     "You are given the FULL document as a PDF plus a global map of it for "
     "context. Work on ONE section at a time, identified by name and physical "
     "page range below. " + _PASS2_RULES + "\n\n"
+    "IMPORTANT -- scope: extract ONLY the content that belongs to the CURRENT "
+    "SECTION named below (its pages may share a page with adjacent sections). "
+    "Skip any text that belongs to other sections."
+)
+
+PASS2_SYSTEM_WINDOW = (
+    "You are an expert at preparing benefits/SPD documents for retrieval. "
+    "You are given a contiguous EXCERPT of a larger document as a PDF plus a "
+    "global map of the whole document for context. Work on ONE section at a "
+    "time, identified by name and physical page range below; page numbers "
+    "refer to the attached PDF, whose first page is page 1. " + _PASS2_RULES
+    + "\n\n"
     "IMPORTANT -- scope: extract ONLY the content that belongs to the CURRENT "
     "SECTION named below (its pages may share a page with adjacent sections). "
     "Skip any text that belongs to other sections."
@@ -456,6 +469,89 @@ def dedupe_raw_chunks(
     return out
 
 
+@dataclass
+class _Window:
+    """A contiguous run of sections served from one prompt-cached PDF slice.
+
+    ``block`` is the slice's document block carrying the cache breakpoint;
+    ``None`` means this window's sections run in plain per-section slice mode
+    (a lone section, an over-budget slice, or a mid-run context overflow).
+    """
+
+    page_start: int  # absolute, 1-indexed, inclusive
+    page_end: int    # absolute, 1-indexed, inclusive
+    sections: List[Section] = field(default_factory=list)
+    block: Optional[Dict[str, Any]] = None
+
+
+def _build_windows(
+    pdf_bytes: bytes,
+    page_count: int,
+    sections: List[Section],
+    max_pages: int,
+    max_encoded_bytes: int,
+) -> List[_Window]:
+    """Group contiguous sections into cacheable page windows, in order.
+
+    Greedy by page span: a section joins the current window while the union
+    of their page ranges stays within ``max_pages``. A window only gets a
+    cached block when it serves at least two sections (a lone section would
+    pay the 1.25x cache-write premium with nothing ever reading it) and its
+    slice fits the request budget; over-budget windows are split by section
+    until they fit or degrade to uncached singles.
+    """
+    grouped: List[_Window] = []
+    for sec in sections:
+        s = max(1, min(sec.page_start, page_count))
+        e = max(s, min(sec.page_end, page_count))
+        if grouped:
+            cur = grouped[-1]
+            if max(cur.page_end, e) - min(cur.page_start, s) + 1 <= max_pages:
+                cur.sections.append(sec)
+                cur.page_start = min(cur.page_start, s)
+                cur.page_end = max(cur.page_end, e)
+                continue
+        grouped.append(_Window(page_start=s, page_end=e, sections=[sec]))
+
+    windows: List[_Window] = []
+
+    def emit(win: _Window) -> None:
+        if len(win.sections) < 2:
+            windows.append(win)
+            return
+        try:
+            slices = slice_to_fit(
+                pdf_bytes, win.page_start, win.page_end, max_encoded_bytes
+            )
+        except ValueError:
+            # A single page alone exceeds the budget; no window over this
+            # range can be cached. Degrade to uncached singles and let the
+            # per-section path surface (or work around) the oversized page.
+            slices = []
+        if len(slices) == 1:
+            win.block = document_block(slices[0].pdf_bytes)
+            win.block["cache_control"] = {"type": "ephemeral"}
+            windows.append(win)
+            return
+        if not slices:
+            for sec in win.sections:
+                ps = max(1, min(sec.page_start, page_count))
+                pe = max(ps, min(sec.page_end, page_count))
+                windows.append(_Window(page_start=ps, page_end=pe, sections=[sec]))
+            return
+        # Slice over budget (e.g. scanned pages): split the section run in
+        # half and retry each side, re-deriving the halves' page spans.
+        mid = len(win.sections) // 2
+        for part in (win.sections[:mid], win.sections[mid:]):
+            ps = max(1, min(min(x.page_start for x in part), page_count))
+            pe = max(ps, min(max(x.page_end for x in part), page_count))
+            emit(_Window(page_start=ps, page_end=pe, sections=part))
+
+    for win in grouped:
+        emit(win)
+    return windows
+
+
 def chunk_section(
     client: Any,
     config: ChunkerConfig,
@@ -463,6 +559,7 @@ def chunk_section(
     profile: DocumentProfile,
     section: Section,
     full_doc_block: Optional[Dict[str, Any]] = None,
+    window: Optional[_Window] = None,
     usage: Optional[UsageTracker] = None,
 ) -> List[Dict[str, Any]]:
     """Ask the model for this section's chunks (raw dicts, pre token-guard).
@@ -470,6 +567,10 @@ def chunk_section(
     When ``full_doc_block`` is given (cached full-document mode), every call
     reuses the same prompt-cached PDF block and only the trailing instruction
     varies, so calls after the first read the document at ~0.1x input price.
+    When ``window`` is given with a cached block (windowed cached mode, for
+    documents too large for full-document mode), the same applies to the
+    window's page slice: sections in the window share one cached block, with
+    the model's slice-relative pages shifted back to absolute afterward.
     Otherwise the section's pages are sliced out (split further if a slice
     would exceed the request-size budget) and sent per call.
     """
@@ -496,6 +597,31 @@ def chunk_section(
         # Full-document mode: the model saw the whole PDF, pages are absolute.
         return _normalize_chunk_pages(
             raw.get("chunks", []), 0, page_start, page_end
+        )
+
+    if window is not None and window.block is not None:
+        offset = window.page_start - 1
+        instruction = (
+            _global_context(profile, section)
+            + f"\n- Physical pages in the attached PDF: "
+            + f"{page_start - offset}-{page_end - offset}\n\n"
+            + _sizing_instruction(config)
+        )
+        raw = structured_call(
+            client,
+            model=config.pass2_model,
+            system=PASS2_SYSTEM_WINDOW,
+            content=[window.block, {"type": "text", "text": instruction}],
+            schema=_CHUNKS_SCHEMA,
+            max_tokens=config.max_output_tokens,
+            repair_attempts=config.max_repair_attempts,
+            transient_retries=config.max_transient_retries,
+            usage=usage,
+        )
+        # Windowed mode: the model saw only the window slice, so its page 1
+        # is the window's first absolute page.
+        return _normalize_chunk_pages(
+            raw.get("chunks", []), offset, page_start, page_end
         )
 
     instruction = _global_context(profile, section) + "\n\n" + _sizing_instruction(
@@ -577,8 +703,10 @@ def chunk_document(
     # page cap and the request budget, send the *same* document block (with a
     # cache breakpoint) on every section call. Only the trailing instruction
     # varies, so calls 2..N read the document from the prompt cache instead of
-    # re-paying full input price per section. Otherwise fall back to slicing
-    # each section's pages.
+    # re-paying full input price per section. Larger documents fall back to
+    # windowed cached mode (contiguous sections share one cached page-window
+    # slice), and only isolated or oversized sections drop to plain
+    # per-section slices.
     full_doc_block: Optional[Dict[str, Any]] = None
     if (
         profile.page_count <= _FULL_DOC_PAGE_LIMIT
@@ -589,6 +717,30 @@ def chunk_document(
         logger.info("Pass 2: using cached full-document mode")
 
     sections = list(profile.sections) if sections is None else list(sections)
+
+    # Windowed cached mode: documents too large for full-document mode are
+    # carved into contiguous multi-section page windows (bounded by the
+    # native-PDF page cap and the request budget), each cached and shared by
+    # its sections -- pages are paid for once per window instead of once per
+    # section. Pass 1's page cap doubles as the window size.
+    windows: Optional[List[_Window]] = None
+    if full_doc_block is None and sections:
+        built = _build_windows(
+            pdf_bytes,
+            profile.page_count,
+            sections,
+            min(_FULL_DOC_PAGE_LIMIT, config.max_pages_per_batch),
+            config.max_encoded_request_bytes,
+        )
+        if any(w.block is not None for w in built):
+            windows = built
+            cached = sum(1 for w in built if w.block is not None)
+            logger.info(
+                "Pass 2: using windowed cached mode "
+                "(%d cached window(s) over %d sections)",
+                cached,
+                len(sections),
+            )
     if on_progress:
         on_progress(0, len(sections))
 
@@ -605,7 +757,9 @@ def chunk_document(
     # reliable signal, and it would repeat on every full-document call.
     state = {"full_doc_block": full_doc_block}
 
-    def fetch(section: Section) -> List[Dict[str, Any]]:
+    def fetch(
+        section: Section, window: Optional[_Window] = None
+    ) -> List[Dict[str, Any]]:
         try:
             block = state["full_doc_block"]
             if block is not None:
@@ -623,6 +777,23 @@ def chunk_document(
                         "(prompt caching disabled)"
                     )
                     state["full_doc_block"] = None
+            if window is not None and window.block is not None:
+                try:
+                    return chunk_section(
+                        client, config, pdf_bytes, profile, section,
+                        window=window, usage=usage,
+                    )
+                except Exception as exc:
+                    if "prompt is too long" not in str(exc):
+                        raise
+                    logger.warning(
+                        "Pass 2: window pages %d-%d overflows the model's "
+                        "context window; falling back to per-section slices "
+                        "for its sections",
+                        window.page_start,
+                        window.page_end,
+                    )
+                    window.block = None
             return chunk_section(
                 client, config, pdf_bytes, profile, section,
                 full_doc_block=None, usage=usage,
@@ -635,7 +806,12 @@ def chunk_document(
 
     workers = min(max(1, config.pass2_concurrency), len(sections) or 1)
     if workers <= 1:
-        results: Iterable[List[Dict[str, Any]]] = (fetch(s) for s in sections)
+        if windows is not None:
+            results: Iterable[List[Dict[str, Any]]] = (
+                fetch(s, w) for w in windows for s in w.sections
+            )
+        else:
+            results = (fetch(s) for s in sections)
     elif full_doc_block is not None:
         # The first call writes the document into the prompt cache; only fan
         # out once it exists, so the remaining calls all read it instead of
@@ -646,6 +822,23 @@ def chunk_document(
                 yield from pool.map(fetch, sections[1:])
 
         results = staggered()
+    elif windows is not None:
+        # Same stagger per window: the window's first section writes its
+        # slice into the cache, then the rest fan out and read it. Windows
+        # run in section order, so downstream consumption is unchanged.
+        def windowed() -> Iterator[List[Dict[str, Any]]]:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for win in windows:
+                    rest = win.sections
+                    if win.block is not None:
+                        yield fetch(rest[0], win)
+                        rest = rest[1:]
+                    if rest:
+                        yield from pool.map(
+                            lambda s, w=win: fetch(s, w), rest
+                        )
+
+        results = windowed()
     else:
 
         def fanned_out() -> Iterator[List[Dict[str, Any]]]:

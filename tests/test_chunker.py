@@ -599,3 +599,113 @@ def test_chunk_document_reports_section_progress():
     )
     # Results are consumed in section order, so progress is deterministic.
     assert events == [(0, 2), (1, 2), (2, 2)]
+
+
+# --- windowed cached mode (documents too large for full-document mode) -----
+
+
+def _four_section_profile(page_count: int = 120) -> DocumentProfile:
+    return DocumentProfile(
+        source_file="big.pdf",
+        page_count=page_count,
+        sections=[
+            Section("Eligibility", "eligibility", "", 1, 30),
+            Section("Benefits", "benefits", "", 31, 50),
+            Section("Claims", "claims", "", 51, 80),
+            Section("Appeals", "appeals", "", 81, 95),
+        ],
+    )
+
+
+def test_build_windows_groups_by_page_cap():
+    pdf = make_pdf(120)
+    sections = _four_section_profile().sections
+    windows = chunker._build_windows(pdf, 120, sections, 50, 10_000_000)
+    # Sections 1+2 span pages 1-50, sections 3+4 span 51-100; adding section
+    # 3 to the first window would span 1-80 > 50, so it starts a new one.
+    assert [(w.page_start, w.page_end, len(w.sections)) for w in windows] == [
+        (1, 50, 2),
+        (51, 95, 2),
+    ]
+    for w in windows:
+        assert w.block is not None
+        assert w.block["cache_control"] == {"type": "ephemeral"}
+    # Order over all windows preserves the original section order.
+    flat = [s.title for w in windows for s in w.sections]
+    assert flat == [s.title for s in sections]
+
+
+def test_build_windows_lone_or_oversized_sections_stay_uncached():
+    pdf = make_pdf(120)
+    # One section spanning more pages than the cap: its own window, uncached.
+    big = [Section("Everything", "general", "", 1, 80)]
+    windows = chunker._build_windows(pdf, 120, big, 50, 10_000_000)
+    assert len(windows) == 1 and windows[0].block is None
+
+    # A byte budget too small for any multi-page window degrades to uncached
+    # singles rather than caching slices nothing will ever read.
+    sections = _four_section_profile().sections
+    windows = chunker._build_windows(pdf, 120, sections, 50, 1)
+    assert all(w.block is None for w in windows)
+    assert [len(w.sections) for w in windows] == [1, 1, 1, 1]
+
+
+def test_chunk_document_windowed_mode_shares_cached_slice():
+    profile = _four_section_profile()  # 120 pages > the 100-page full-doc cap
+    payloads = [
+        {"chunks": [{"text": "alpha one", "page_start": 1, "page_end": 2}]},
+        {"chunks": [{"text": "beta two", "page_start": 31, "page_end": 40}]},
+        # Window 2 starts at page 51: the model numbers pages relative to
+        # the slice, so 1-5 must come back as absolute pages 51-55.
+        {"chunks": [{"text": "gamma three", "page_start": 1, "page_end": 5}]},
+        {"chunks": [{"text": "delta four", "page_start": 31, "page_end": 45}]},
+    ]
+    client = FakeClient(payloads)
+    config = ChunkerConfig(pass2_concurrency=1)
+
+    chunks = chunker.chunk_document(
+        client, config, make_pdf(120), profile, COUNTER
+    )
+
+    calls = client.messages.calls
+    assert len(calls) == 4
+    assert all(c["system"] == chunker.PASS2_SYSTEM_WINDOW for c in calls)
+    blocks = [c["messages"][0]["content"][0] for c in calls]
+    for b in blocks:
+        assert b["cache_control"] == {"type": "ephemeral"}
+    # Sections within a window share the identical cached slice; the two
+    # windows carry different slices.
+    assert blocks[0] == blocks[1]
+    assert blocks[2] == blocks[3]
+    assert blocks[0]["source"]["data"] != blocks[2]["source"]["data"]
+    # Instructions reference slice-relative pages (Claims: 51-80 -> 1-30).
+    assert "Physical pages in the attached PDF: 1-30" in (
+        calls[2]["messages"][0]["content"][1]["text"]
+    )
+    # Model pages come back shifted to absolute document pages.
+    by_text = {c.text: c for c in chunks}
+    assert (by_text["gamma three"].page_start, by_text["gamma three"].page_end) == (51, 55)
+    assert (by_text["delta four"].page_start, by_text["delta four"].page_end) == (81, 95)
+    assert (by_text["alpha one"].page_start, by_text["alpha one"].page_end) == (1, 2)
+
+
+def test_windowed_context_overflow_disables_only_that_window():
+    profile = _four_section_profile()
+    overflow = Exception(
+        "Error code: 400 - prompt is too long: 200275 tokens > 200000 maximum"
+    )
+    payload = {"chunks": [{"text": "hello world"}]}
+    client = FakeClient([overflow, payload, payload, payload, payload])
+    config = ChunkerConfig(pass2_concurrency=1)
+
+    chunks = chunker.chunk_document(
+        client, config, make_pdf(120), profile, COUNTER
+    )
+
+    assert len(chunks) == 4  # every section still chunked
+    calls = client.messages.calls
+    # Failed windowed call for section 1, then sections 1-2 as plain slices
+    # (their window is disabled), then sections 3-4 on window 2's cache.
+    assert len(calls) == 5
+    cached = ["cache_control" in c["messages"][0]["content"][0] for c in calls]
+    assert cached == [True, False, False, True, True]
